@@ -81,7 +81,11 @@ pub const CPU = struct {
     const STACK_END: u16 = 0x01FF;
 
     pub fn init() CPU {
-        return .{ .sp = 0xFF, .pc = 0, .register_a = 0, .register_x = 0, .register_y = 0, .status = .{}, .program_len = 0, .memory = .{0} ** MEMORY_SIZE };
+        var initial_status = ProcessorStatus{};
+        initial_status.interrupt_disable = true;
+        initial_status.break2 = true;
+
+        return .{ .sp = 0xFD, .pc = 0, .register_a = 0, .register_x = 0, .register_y = 0, .status = initial_status, .program_len = 0, .memory = .{0} ** MEMORY_SIZE };
     }
 
     fn update_zero_and_negative_flags(self: *@This(), result: u8) void {
@@ -123,6 +127,8 @@ pub const CPU = struct {
         self.register_y = 0;
         self.sp = 0xFF;
         self.status = .{};
+        self.status.interrupt_disable = true;
+        self.status.break2 = true;
 
         self.pc = self.mem_read_u16(0xFFFC);
     }
