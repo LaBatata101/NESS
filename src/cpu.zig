@@ -87,7 +87,17 @@ pub const CPU = struct {
         initial_status.interrupt_disable = true;
         initial_status.break2 = true;
 
-        return .{ .sp = 0xFD, .pc = 0, .register_a = 0, .register_x = 0, .register_y = 0, .status = initial_status, .program_len = 0, .program_start_addr = 0x8000, .memory = .{0} ** MEMORY_SIZE };
+        return .{
+            .sp = 0xFF,
+            .pc = 0,
+            .register_a = 0,
+            .register_x = 0,
+            .register_y = 0,
+            .status = initial_status,
+            .program_len = 0,
+            .program_start_addr = 0x8000,
+            .memory = .{0} ** MEMORY_SIZE,
+        };
     }
 
     fn update_zero_and_negative_flags(self: *Self, result: u8) void {
@@ -128,6 +138,7 @@ pub const CPU = struct {
         self.register_x = 0;
         self.register_y = 0;
         self.sp = 0xFF;
+
         self.status = .{};
         self.status.interrupt_disable = true;
         self.status.break2 = true;
