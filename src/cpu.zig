@@ -37,7 +37,6 @@ const ProcessorStatus = packed struct(u8) {
 };
 
 const MEMORY_SIZE = 64 * 1024; // 64KB
-const PROGRAM_START_ADDR = 0x8000;
 
 pub const CPU = struct {
     /// *Program Counter*: points to the next instruction to be executed. The value of program counter is modified
@@ -76,6 +75,7 @@ pub const CPU = struct {
 
     /// The size in bytes of the program being currently executed by the CPU.
     program_len: usize,
+    program_start_addr: u16,
 
     const Self = @This();
 
@@ -87,7 +87,7 @@ pub const CPU = struct {
         initial_status.interrupt_disable = true;
         initial_status.break2 = true;
 
-        return .{ .sp = 0xFD, .pc = 0, .register_a = 0, .register_x = 0, .register_y = 0, .status = initial_status, .program_len = 0, .memory = .{0} ** MEMORY_SIZE };
+        return .{ .sp = 0xFD, .pc = 0, .register_a = 0, .register_x = 0, .register_y = 0, .status = initial_status, .program_len = 0, .program_start_addr = 0x8000, .memory = .{0} ** MEMORY_SIZE };
     }
 
     fn update_zero_and_negative_flags(self: *Self, result: u8) void {
@@ -119,8 +119,8 @@ pub const CPU = struct {
 
     pub fn load(self: *Self, program: []const u8) void {
         self.program_len = program.len;
-        @memcpy(self.memory[PROGRAM_START_ADDR..(PROGRAM_START_ADDR + program.len)], program);
-        self.mem_write_u16(0xFFFC, PROGRAM_START_ADDR);
+        @memcpy(self.memory[self.program_start_addr..(self.program_start_addr + program.len)], program);
+        self.mem_write_u16(0xFFFC, self.program_start_addr);
     }
 
     pub fn reset(self: *Self) void {
@@ -653,7 +653,7 @@ test "0xA8: TAY Transfer Accumulator to Y" {
 test "0xBA: TSX Transfer Stack Pointer to X" {
     var cpu = CPU.init();
     cpu.sp = 0x05;
-    cpu.pc = PROGRAM_START_ADDR;
+    cpu.pc = cpu.program_start_addr;
 
     //               TSX
     cpu.load(&[_]u8{0xBA});
