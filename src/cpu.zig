@@ -77,6 +77,8 @@ pub const CPU = struct {
     /// The size in bytes of the program being currently executed by the CPU.
     program_len: usize,
 
+    const Self = @This();
+
     const STACK_START: u16 = 0x0100;
     const STACK_END: u16 = 0x01FF;
 
@@ -88,40 +90,40 @@ pub const CPU = struct {
         return .{ .sp = 0xFD, .pc = 0, .register_a = 0, .register_x = 0, .register_y = 0, .status = initial_status, .program_len = 0, .memory = .{0} ** MEMORY_SIZE };
     }
 
-    fn update_zero_and_negative_flags(self: *@This(), result: u8) void {
+    fn update_zero_and_negative_flags(self: *Self, result: u8) void {
         self.status.zero_flag = result == 0;
         // Check if bit 7 is set
         self.status.negative_flag = result & 0b1000_0000 != 0;
     }
 
-    fn mem_read(self: @This(), addr: u16) u8 {
+    pub fn mem_read(self: Self, addr: u16) u8 {
         return self.memory[addr];
     }
 
-    fn mem_write(self: *@This(), addr: u16, data: u8) void {
+    pub fn mem_write(self: *Self, addr: u16, data: u8) void {
         self.memory[addr] = data;
     }
 
-    fn mem_read_u16(self: *@This(), addr: u16) u16 {
+    fn mem_read_u16(self: *Self, addr: u16) u16 {
         const lo = @as(u16, self.mem_read(addr));
         const hi = @as(u16, self.mem_read(addr + 1));
         return (hi << 8) | lo;
     }
 
-    fn mem_write_u16(self: *@This(), addr: u16, data: u16) void {
+    fn mem_write_u16(self: *Self, addr: u16, data: u16) void {
         const hi: u8 = @truncate(data >> 8);
         const lo: u8 = @truncate(data);
         self.mem_write(addr, lo);
         self.mem_write(addr + 1, hi);
     }
 
-    fn load(self: *@This(), program: []const u8) void {
+    pub fn load(self: *Self, program: []const u8) void {
         self.program_len = program.len;
         @memcpy(self.memory[PROGRAM_START_ADDR..(PROGRAM_START_ADDR + program.len)], program);
         self.mem_write_u16(0xFFFC, PROGRAM_START_ADDR);
     }
 
-    fn reset(self: *@This()) void {
+    pub fn reset(self: *Self) void {
         self.register_a = 0;
         self.register_x = 0;
         self.register_y = 0;
@@ -133,13 +135,13 @@ pub const CPU = struct {
         self.pc = self.mem_read_u16(0xFFFC);
     }
 
-    pub fn load_and_run(self: *@This(), program: []const u8) void {
+    pub fn load_and_run(self: *Self, program: []const u8) void {
         self.load(program);
         self.reset();
         self.run();
     }
 
-    fn stack_push(self: *@This(), data: u8) void {
+    fn stack_push(self: *Self, data: u8) void {
         var addr = STACK_START + self.sp;
         self.mem_write(addr, data);
         addr -%= 1;
@@ -151,7 +153,7 @@ pub const CPU = struct {
         self.sp = @truncate(addr);
     }
 
-    fn stack_pop(self: *@This()) u8 {
+    fn stack_pop(self: *Self) u8 {
         self.sp +%= 1;
         const addr = STACK_START + self.sp;
         const data = self.mem_read(addr);
@@ -164,7 +166,7 @@ pub const CPU = struct {
         return data;
     }
 
-    fn stack_push_u16(self: *@This(), data: u16) void {
+    fn stack_push_u16(self: *Self, data: u16) void {
         const hi: u8 = @truncate(data >> 8);
         const lo: u8 = @truncate(data);
         // std.debug.print("data: 0x{X} | hi: 0x{X} | lo: 0x{X}\n\n", .{ data, hi, lo });
@@ -172,13 +174,13 @@ pub const CPU = struct {
         self.stack_push(lo);
     }
 
-    fn stack_pop_u16(self: *@This()) u16 {
+    fn stack_pop_u16(self: *Self) u16 {
         const lo = self.stack_pop();
         const hi = self.stack_pop();
         return @as(u16, hi) << 8 | lo;
     }
 
-    fn operand_address(self: *@This(), mode: AdressingMode) u16 {
+    fn operand_address(self: *Self, mode: AdressingMode) u16 {
         return switch (mode) {
             AdressingMode.Immediate => self.pc,
             AdressingMode.ZeroPage => self.mem_read(self.pc),
@@ -228,14 +230,14 @@ pub const CPU = struct {
         };
     }
 
-    fn branch(self: *@This(), mode: AdressingMode, condition: bool) void {
+    fn branch(self: *Self, mode: AdressingMode, condition: bool) void {
         if (condition) {
             const jump_addr = self.operand_address(mode);
             self.pc = jump_addr;
         }
     }
 
-    fn compare(self: *@This(), mode: AdressingMode, register: u8) void {
+    fn compare(self: *Self, mode: AdressingMode, register: u8) void {
         const addr = self.operand_address(mode);
         const data = self.mem_read(addr);
         const result = register -% data;
@@ -244,7 +246,7 @@ pub const CPU = struct {
         self.update_zero_and_negative_flags(result);
     }
 
-    fn adc(self: *@This(), value: u8) void {
+    fn adc(self: *Self, value: u8) void {
         const sum: u16 = @as(u16, self.register_a) + @as(u16, value) + @as(u16, @intFromBool(self.status.carry_flag));
         self.status.carry_flag = (sum > 0xFF);
 
@@ -256,7 +258,16 @@ pub const CPU = struct {
         self.update_zero_and_negative_flags(self.register_a);
     }
 
-    fn run(self: *@This()) void {
+    fn run(self: *Self) void {
+        const T = struct {
+            fn callback(_: *Self) void {
+                // do nothing
+            }
+        };
+        self.run_with(T);
+    }
+
+    pub fn run_with(self: *Self, callback: anytype) void {
         const program_end = self.pc + self.program_len;
         while (self.pc < program_end) {
             const code = self.mem_read(self.pc);
@@ -578,6 +589,8 @@ pub const CPU = struct {
             if (self.pc == pc_state) {
                 self.pc += opcode.size() - 1;
             }
+
+            callback.callback(self);
         }
     }
 };
