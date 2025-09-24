@@ -1387,19 +1387,19 @@ test "0x68: PLA Pop Accumulator from Stack" {
 test "0x20: JSR Jump to Subroutine" {
     var cpu = CPU.init();
     //                       JSR               LDX         LDX         BRK   LDX
-    cpu.load_and_run(&[_]u8{ 0x20, 0x05, 0x80, 0xA2, 0x01, 0xA2, 0x02, 0x00, 0xA2, 0x03 });
+    cpu.load_and_run(&[_]u8{ 0x20, 0x05, 0x00, 0xA2, 0x01, 0xA2, 0x02, 0x00, 0xA2, 0x03 });
 
     try std.testing.expectEqual(2, cpu.register_x);
-    try std.testing.expectEqual(0x8008, cpu.pc);
+    try std.testing.expectEqual(0x0008, cpu.pc);
 }
 
 test "0x60: RTS Return from Subroutine" {
     var cpu = CPU.init();
     //                       JSR               JSR               JSR               LDX         RTS   INX   RTS   BRK
-    cpu.load_and_run(&[_]u8{ 0x20, 0x09, 0x80, 0x20, 0x0C, 0x80, 0x20, 0x0E, 0x80, 0xA2, 0x00, 0x60, 0xE8, 0x60, 0x00 });
+    cpu.load_and_run(&[_]u8{ 0x20, 0x09, 0x00, 0x20, 0x0C, 0x00, 0x20, 0x0E, 0x00, 0xA2, 0x00, 0x60, 0xE8, 0x60, 0x00 });
 
     try std.testing.expectEqual(1, cpu.register_x);
-    try std.testing.expectEqual(0x800f, cpu.pc);
+    try std.testing.expectEqual(0x000f, cpu.pc);
 }
 
 // FIX
@@ -1437,7 +1437,7 @@ test "0x08: PHP Push Processor Status" {
 test "0x28: PLP Pull Processor Status" {
     var cpu = CPU.init();
     //                       SED   SEI   PHP   PLP
-    cpu.load_and_run(&[_]u8{ 0xF8, 0x78, 0x08, 0x20 });
+    cpu.load_and_run(&[_]u8{ 0xF8, 0x78, 0x08, 0x28 });
 
     try std.testing.expect(cpu.status.decimal_mode);
     try std.testing.expect(cpu.status.interrupt_disable);
