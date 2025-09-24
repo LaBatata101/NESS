@@ -230,13 +230,14 @@ pub const CPU = struct {
     }
 
     fn adc(self: *@This(), value: u8) void {
-        var result = @addWithOverflow(self.register_a, value);
-        result[0] += @intFromBool(self.status.carry_flag);
+        const sum: u16 = @as(u16, self.register_a) + @as(u16, value) + @as(u16, @intFromBool(self.status.carry_flag));
+        self.status.carry_flag = (sum > 0xFF);
 
-        self.status.carry_flag = result[1] == 1;
-        self.status.overflow_flag = (value ^ result[0]) & (result[0] ^ self.register_a) & 0x80 != 0;
+        const result: u8 = @truncate(sum);
 
-        self.register_a = result[0];
+        self.status.overflow_flag = (value ^ result) & (result ^ self.register_a) & 0x80 != 0;
+
+        self.register_a = result;
         self.update_zero_and_negative_flags(self.register_a);
     }
 
