@@ -186,11 +186,20 @@ pub const CPU = struct {
                 return self.pc +% 1 +% @as(u16, @bitCast(@as(i16, offset)));
             },
             AdressingMode.Indirect => {
-                const base = self.mem_read(self.pc);
-                const lo = self.mem_read(base);
-                const hi = self.mem_read(base +% 1);
+                const ptr_addr = self.mem_read_u16(self.pc);
 
-                return @as(u16, hi) << 8 | @as(u16, lo);
+                // NOTE - 6502 bug mode with with page boundary:
+                // if address $3000 contains $40, $30FF contains $80, and $3100 contains $50,
+                // the result of JMP ($30FF) will be a transfer of control to $4080 rather than $5080 as you intended
+                // i.e. the 6502 took the low byte of the address from $30FF and the high byte from $3000
+                if (ptr_addr & 0xFF == 0xFF) {
+                    const lo = self.mem_read(ptr_addr);
+                    const hi = self.mem_read(ptr_addr & 0xFF00);
+
+                    return @as(u16, hi) << 8 | @as(u16, lo);
+                } else {
+                    return self.mem_read_u16(ptr_addr);
+                }
             },
             AdressingMode.IndirectX => {
                 const base = self.mem_read(self.pc);
@@ -214,8 +223,8 @@ pub const CPU = struct {
     }
 
     fn branch(self: *@This(), mode: AdressingMode, condition: bool) void {
-        const jump_addr = self.operand_address(mode);
         if (condition) {
+            const jump_addr = self.operand_address(mode);
             self.pc = jump_addr;
         }
     }
