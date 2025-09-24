@@ -670,6 +670,13 @@ test "0x8A: TXA Transfer X to Accumulator" {
     try std.testing.expectEqual(0x69, cpu.register_x);
     try std.testing.expect(!cpu.status.zero_flag);
     try std.testing.expect(!cpu.status.negative_flag);
+
+    //                       LDX         TXA
+    cpu.load_and_run(&[_]u8{ 0xA2, 0x00, 0x8A });
+
+    try std.testing.expectEqual(0x00, cpu.register_x);
+    try std.testing.expect(cpu.status.zero_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
 }
 
 test "0x98: TYA Transfer Y to Accumulator" {
@@ -1270,6 +1277,12 @@ test "0xCA: DEX Decrement X Register" {
     try std.testing.expect(!cpu.status.zero_flag);
     try std.testing.expect(cpu.status.negative_flag);
     try std.testing.expectEqual(0x80, cpu.register_x);
+
+    //                       LDX         DEX   BRK
+    cpu.load_and_run(&[_]u8{ 0xA2, 0x00, 0xCA, 0x00 });
+    try std.testing.expect(!cpu.status.zero_flag);
+    try std.testing.expect(cpu.status.negative_flag);
+    try std.testing.expectEqual(0xFF, cpu.register_x);
 }
 
 test "0x88: DEY Decrement Y Register" {
