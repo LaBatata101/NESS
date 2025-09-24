@@ -554,9 +554,10 @@ pub const CPU = struct {
                     self.update_zero_and_negative_flags(self.register_a);
                 },
                 .PHP => {
-                    self.status.break_command = true;
-                    self.status.break2 = true;
-                    self.stack_push(@bitCast(self.status));
+                    var copy_status = self.status;
+                    copy_status.break_command = true;
+                    copy_status.break2 = true;
+                    self.stack_push(@bitCast(copy_status));
                 },
                 .PLP => {
                     self.status = @bitCast(self.stack_pop());
