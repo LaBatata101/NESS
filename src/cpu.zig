@@ -284,7 +284,6 @@ pub const CPU = struct {
             const opcode = opcodes.get_opcode(code);
             self.pc += 1;
             const pc_state = self.pc;
-            // std.debug.print("PC: 0x{X} code: 0x{X} {any}\n", .{ self.pc, code, opcode });
 
             switch (opcode) {
                 .ADC => {
@@ -552,9 +551,7 @@ pub const CPU = struct {
                     self.pc = self.stack_pop_u16() + 1;
                 },
                 .RTI => {
-                    const s = self.stack_pop();
-                    // std.debug.print("P: {any} | PC: 0x{X} | S: {X}\n", .{ self.status, self.pc, s });
-                    self.status = @bitCast(s);
+                    self.status = @bitCast(self.stack_pop());
                     self.status.break_command = false;
                     self.status.break2 = true;
 
@@ -2163,32 +2160,29 @@ test "0x60: RTS Return from Subroutine" {
     try std.testing.expectEqual(0x800F, cpu.pc);
 }
 
-// FIX
-// test "0x40: RTI Return from Interrupt" {
-//     const allocator = std.testing.allocator;
-//     const test_rom = try rom.TestRom.testRom(
-//         allocator,
-//         //     RTI   BRK
-//         &[_]u8{0x40, 0x00},
-//     );
-//     const bus = Bus.init(try Rom.load(test_rom));
-//     defer allocator.free(test_rom);
-//
-//     var cpu = CPU.init(bus);
-//     cpu.status.carry_flag = true;
-//     cpu.status.negative_flag = true;
-//
-//     cpu.stack_push_u16(cpu.pc);
-//     std.debug.print("AFTER FIRST PUSH: {any}\n", .{cpu.memory[0x0100..0x01FF]});
-//     cpu.stack_push(@bitCast(cpu.status));
-//     std.debug.print("AFTER SECOND PUSH: {any}\n", .{cpu.memory[0x0100..0x01FF]});
-//
-//     cpu.run();
-//
-//     try std.testing.expect(cpu.status.carry_flag);
-//     try std.testing.expect(cpu.status.negative_flag);
-//     try std.testing.expectEqual(PROGRAM_START_ADDR, cpu.pc);
-// }
+test "0x40: RTI Return from Interrupt" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      RTI   BRK
+        &[_]u8{ 0x40, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.status.carry_flag = true;
+    cpu.status.negative_flag = true;
+
+    cpu.stack_push_u16(cpu.pc + 1);
+    cpu.stack_push(@bitCast(cpu.status));
+
+    cpu.run();
+
+    try std.testing.expect(cpu.status.carry_flag);
+    try std.testing.expect(cpu.status.negative_flag);
+    try std.testing.expectEqual(0x8002, cpu.pc);
+}
 
 test "0x08: PHP Push Processor Status" {
     const allocator = std.testing.allocator;
