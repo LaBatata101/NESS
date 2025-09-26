@@ -1,5 +1,9 @@
 const std = @import("std");
 
+const rom = @import("rom.zig");
+
+const Bus = @import("bus.zig").Bus;
+const Rom = rom.Rom;
 const opcodes = @import("opcodes.zig");
 const AdressingMode = opcodes.AdressingMode;
 
@@ -36,8 +40,6 @@ const ProcessorStatus = packed struct(u8) {
     negative_flag: bool = false,
 };
 
-const MEMORY_SIZE = 64 * 1024; // 64KB
-
 pub const CPU = struct {
     /// *Program Counter*: points to the next instruction to be executed. The value of program counter is modified
     /// automatically as instructions are executed.
@@ -70,8 +72,7 @@ pub const CPU = struct {
     /// results of the operation. Each flag has a single bit within the register.
     status: ProcessorStatus,
 
-    // 64KiB of address space
-    memory: [MEMORY_SIZE]u8,
+    bus: Bus,
 
     /// The size in bytes of the program being currently executed by the CPU.
     program_len: usize,
@@ -82,21 +83,22 @@ pub const CPU = struct {
     const STACK_START: u16 = 0x0100;
     const STACK_END: u16 = 0x01FF;
 
-    pub fn init() CPU {
+    pub fn init(bus: Bus) CPU {
         var initial_status = ProcessorStatus{};
         initial_status.interrupt_disable = true;
         initial_status.break2 = true;
 
         return .{
             .sp = 0xFF,
-            .pc = 0,
+            .pc = 0x8000,
             .register_a = 0,
             .register_x = 0,
             .register_y = 0,
             .status = initial_status,
-            .program_len = 0,
+            .program_len = bus.rom.prg_rom.len,
             .program_start_addr = 0x8000,
-            .memory = .{0} ** MEMORY_SIZE,
+            // .program_start_addr = 0x0000,
+            .bus = bus,
         };
     }
 
@@ -107,29 +109,27 @@ pub const CPU = struct {
     }
 
     pub fn mem_read(self: Self, addr: u16) u8 {
-        return self.memory[addr];
+        return self.bus.mem_read(addr);
     }
 
     pub fn mem_write(self: *Self, addr: u16, data: u8) void {
-        self.memory[addr] = data;
+        self.bus.mem_write(addr, data);
     }
 
     fn mem_read_u16(self: *Self, addr: u16) u16 {
-        const lo = @as(u16, self.mem_read(addr));
-        const hi = @as(u16, self.mem_read(addr + 1));
-        return (hi << 8) | lo;
+        return self.bus.mem_read_u16(addr);
     }
 
     fn mem_write_u16(self: *Self, addr: u16, data: u16) void {
-        const hi: u8 = @truncate(data >> 8);
-        const lo: u8 = @truncate(data);
-        self.mem_write(addr, lo);
-        self.mem_write(addr + 1, hi);
+        self.bus.mem_write_u16(addr, data);
     }
 
     pub fn load(self: *Self, program: []const u8) void {
         self.program_len = program.len;
-        @memcpy(self.memory[self.program_start_addr..(self.program_start_addr + program.len)], program);
+        // @memcpy(self.bus.ram[self.program_start_addr..(self.program_start_addr + program.len)], program);
+        for (0..program.len) |i| {
+            self.mem_write(self.program_start_addr + @as(u16, @intCast(i)), program[i]);
+        }
         self.mem_write_u16(0xFFFC, self.program_start_addr);
     }
 
@@ -279,12 +279,12 @@ pub const CPU = struct {
     }
 
     pub fn run_with(self: *Self, callback: anytype) void {
-        const program_end = self.pc + self.program_len;
-        while (self.pc < program_end) {
+        while (true) {
             const code = self.mem_read(self.pc);
             const opcode = opcodes.get_opcode(code);
             self.pc += 1;
             const pc_state = self.pc;
+            // std.debug.print("PC: 0x{X} code: 0x{X} {any}\n", .{ self.pc, code, opcode });
 
             switch (opcode) {
                 .ADC => {
@@ -607,10 +607,18 @@ pub const CPU = struct {
 };
 
 // test "0x00: BRK Force Interrupt" {
-//     var cpu = CPU.init();
+//     const allocator = std.testing.allocator;
+//     const test_rom = try rom.TestRom.testRom(
+//         allocator,
+//         //      SEI   SEC   BRK   LDA
+//         &[_]u8{ 0x78, 0x38, 0x00, 0xA9, 0x01 },
+//     );
+//     const bus = Bus.init(try Rom.load(test_rom));
+//     defer allocator.free(test_rom);
+//
+//     var cpu = CPU.init(bus);
 //     cpu.mem_write_u16(0xFFFE, 0x1234);
-//     //                       SEI   SEC   BRK   LDA
-//     cpu.load_and_run(&[_]u8{ 0x78, 0x38, 0x00, 0xA9, 0x01 });
+//     cpu.run();
 //
 //     try std.testing.expect(cpu.status.break_command);
 //     try std.testing.expectEqual(0x1234, cpu.pc);
@@ -623,9 +631,17 @@ pub const CPU = struct {
 // }
 
 test "0xA9: LDA immediate load data" {
-    var cpu = CPU.init();
-    //                       LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x05, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         BRK
+        &[_]u8{ 0xA9, 0x05, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x05, cpu.register_a);
     try std.testing.expect(!cpu.status.zero_flag);
@@ -633,18 +649,34 @@ test "0xA9: LDA immediate load data" {
 }
 
 test "0xA9: LDA zero flag" {
-    var cpu = CPU.init();
-    //                       LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x00, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         BRK
+        &[_]u8{ 0xA9, 0x00, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x00, cpu.register_a);
     try std.testing.expect(cpu.status.zero_flag);
 }
 
 test "0xAA: TAX copies register A contents to X" {
-    var cpu = CPU.init();
-    //                       LDA        TAX   BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0xA, 0xAA, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA        TAX   BRK
+        &[_]u8{ 0xA9, 0xA, 0xAA, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(10, cpu.register_x);
     try std.testing.expect(!cpu.status.zero_flag);
@@ -652,9 +684,17 @@ test "0xAA: TAX copies register A contents to X" {
 }
 
 test "0xA8: TAY Transfer Accumulator to Y" {
-    var cpu = CPU.init();
-    //                       LDA         TAY
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x69, 0xA8 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         TAY   BRK
+        &[_]u8{ 0xA9, 0x69, 0xA8, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x69, cpu.register_y);
     try std.testing.expect(!cpu.status.zero_flag);
@@ -662,38 +702,67 @@ test "0xA8: TAY Transfer Accumulator to Y" {
 }
 
 test "0xBA: TSX Transfer Stack Pointer to X" {
-    var cpu = CPU.init();
-    cpu.sp = 0x05;
-    cpu.pc = cpu.program_start_addr;
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //     TSX   BRK
+        &[_]u8{ 0xBA, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
 
-    //               TSX
-    cpu.load(&[_]u8{0xBA});
+    var cpu = CPU.init(bus);
+    cpu.sp = 0x05;
     cpu.run();
 
     try std.testing.expectEqual(0x05, cpu.register_x);
 }
 
 test "0x8A: TXA Transfer X to Accumulator" {
-    var cpu = CPU.init();
-    //                       LDX         TXA
-    cpu.load_and_run(&[_]u8{ 0xA2, 0x69, 0x8A });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDX         TXA   BRK
+        &[_]u8{ 0xA2, 0x69, 0x8A, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x69, cpu.register_x);
     try std.testing.expect(!cpu.status.zero_flag);
     try std.testing.expect(!cpu.status.negative_flag);
 
-    //                       LDX         TXA
-    cpu.load_and_run(&[_]u8{ 0xA2, 0x00, 0x8A });
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDX         TXA   BRK
+        &[_]u8{ 0xA2, 0x00, 0x8A, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
 
-    try std.testing.expectEqual(0x00, cpu.register_x);
-    try std.testing.expect(cpu.status.zero_flag);
-    try std.testing.expect(!cpu.status.negative_flag);
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
+
+    try std.testing.expectEqual(0x00, cpu2.register_x);
+    try std.testing.expect(cpu2.status.zero_flag);
+    try std.testing.expect(!cpu2.status.negative_flag);
 }
 
 test "0x98: TYA Transfer Y to Accumulator" {
-    var cpu = CPU.init();
-    //                       LDY         TYA
-    cpu.load_and_run(&[_]u8{ 0xA0, 0x69, 0x98 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDY         TYA   BRK
+        &[_]u8{ 0xA0, 0x69, 0x98, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x69, cpu.register_a);
     try std.testing.expect(!cpu.status.zero_flag);
@@ -701,17 +770,33 @@ test "0x98: TYA Transfer Y to Accumulator" {
 }
 
 test "0x9A: TXS Transfer X to Stack Pointer" {
-    var cpu = CPU.init();
-    //                       LDX         TXS
-    cpu.load_and_run(&[_]u8{ 0xA2, 0x69, 0x9A });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDX         TXS   BRK
+        &[_]u8{ 0xA2, 0x69, 0x9A, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x69, cpu.sp);
 }
 
 test "4 ops (LDA, TAX, INX, BRK) working together" {
-    var cpu = CPU.init();
-    //                       LDA        LDA         TAX   INX   BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0xA, 0xA9, 0xC0, 0xAA, 0xE8, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA        LDA         TAX   INX   BRK
+        &[_]u8{ 0xA9, 0xA, 0xA9, 0xC0, 0xAA, 0xE8, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0xC0, cpu.register_a);
     try std.testing.expectEqual(0xC1, cpu.register_x);
@@ -720,44 +805,84 @@ test "4 ops (LDA, TAX, INX, BRK) working together" {
 }
 
 test "INX overflow" {
-    var cpu = CPU.init();
-    //                       LDA         TAX   INX   INX   BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0xFF, 0xAA, 0xE8, 0xE8, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         TAX   INX   INX   BRK
+        &[_]u8{ 0xA9, 0xFF, 0xAA, 0xE8, 0xE8, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(1, cpu.register_x);
 }
 
 test "0xA5: LDA from memory" {
-    var cpu = CPU.init();
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         BRK
+        &[_]u8{ 0xA5, 0x10, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
     cpu.mem_write(0x10, 0x55);
-    //                       LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA5, 0x10, 0x00 });
+    cpu.run();
 
     try std.testing.expectEqual(0x55, cpu.register_a);
 }
 
 test "0xC9: CMP equal values" {
-    var cpu = CPU.init();
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         CMP         BRK
+        &[_]u8{ 0xA9, 0x01, 0xC9, 0x01, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
     cpu.mem_write(0x10, 0x55);
-    //                       LDA         CMP         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0xC9, 0x01, 0x00 });
+    cpu.run();
 
     try std.testing.expect(cpu.status.zero_flag);
 }
 
 test "0xC9: CMP different values" {
-    var cpu = CPU.init();
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         CMP         BRK
+        &[_]u8{ 0xA9, 0x01, 0xC9, 0x03, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
     cpu.mem_write(0x10, 0x55);
-    //                       LDA         CMP         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0xC9, 0x03, 0x00 });
+    cpu.run();
 
     try std.testing.expect(!cpu.status.zero_flag);
 }
 
 test "0x69: ADC add with carry - no overflow" {
-    var cpu = CPU.init();
-    //                       LDA         TAX         ADC         BRK
-    cpu.load_and_run(&[_]u8{ 0xa9, 0xc0, 0xaa, 0xe8, 0x69, 0xc4, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         TAX         ADC         BRK
+        &[_]u8{ 0xa9, 0xc0, 0xaa, 0xe8, 0x69, 0xc4, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x84, cpu.register_a);
     try std.testing.expectEqual(0xc1, cpu.register_x);
@@ -766,9 +891,17 @@ test "0x69: ADC add with carry - no overflow" {
 }
 
 test "0x65: ADC add with carry - overflow" {
-    var cpu = CPU.init();
-    //                       LDA         STA         ADC         BRK
-    cpu.load_and_run(&[_]u8{ 0xa9, 0x80, 0x85, 0x01, 0x65, 0x01, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         ADC         BRK
+        &[_]u8{ 0xa9, 0x80, 0x85, 0x01, 0x65, 0x01, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0, cpu.register_a);
     try std.testing.expectEqual(0, cpu.register_x);
@@ -777,9 +910,17 @@ test "0x65: ADC add with carry - overflow" {
 }
 
 test "0xE9: SBC Subtract with Carry - no overflow" {
-    var cpu = CPU.init();
-    //                       LDA         SBC
-    cpu.load_and_run(&[_]u8{ 0xa9, 0xF0, 0xE9, 0x50 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         SBC   BRK
+        &[_]u8{ 0xa9, 0xF0, 0xE9, 0x50, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x9F, cpu.register_a);
     try std.testing.expect(cpu.status.carry_flag);
@@ -789,9 +930,17 @@ test "0xE9: SBC Subtract with Carry - no overflow" {
 }
 
 test "0xE9: SBC Subtract with Carry - overflow" {
-    var cpu = CPU.init();
-    //                       LDA         SBC
-    cpu.load_and_run(&[_]u8{ 0xa9, 0xD0, 0xE9, 0x70 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         SBC   BRK
+        &[_]u8{ 0xa9, 0xD0, 0xE9, 0x70, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x5F, cpu.register_a);
     try std.testing.expect(cpu.status.carry_flag);
@@ -801,335 +950,639 @@ test "0xE9: SBC Subtract with Carry - overflow" {
 }
 
 test "0x29: logical AND - true result" {
-    var cpu = CPU.init();
-    //                       LDA         AND        BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x29, 0x01, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         AND        BRK
+        &[_]u8{ 0xA9, 0x01, 0x29, 0x01, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x01, cpu.register_a);
 }
 
 test "0x29: logical AND - false result" {
-    var cpu = CPU.init();
-    //                       LDA         AND         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x29, 0x00, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         AND         BRK
+        &[_]u8{ 0xA9, 0x01, 0x29, 0x00, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0, cpu.register_a);
     try std.testing.expect(cpu.status.zero_flag);
 }
 
 test "0x0A: ASL Arithmetic Shift Left - carry flag set" {
-    var cpu = CPU.init();
-    //                       LDA         ASL   BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x80, 0x0A, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ASL   BRK
+        &[_]u8{ 0xA9, 0x80, 0x0A, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0, cpu.register_a);
     try std.testing.expect(cpu.status.carry_flag);
 }
 
 test "0x0A: ASL Arithmetic Shift Left - carry flag not set" {
-    var cpu = CPU.init();
-    //                       LDA         ASL
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x0A });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ASL   BRK
+        &[_]u8{ 0xA9, 0x01, 0x0A, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(2, cpu.register_a);
     try std.testing.expect(!cpu.status.carry_flag);
 }
 
 test "0x06: ASL Arithmetic Shift Left - read value from memory" {
-    var cpu = CPU.init();
-    //                       LDA         STA         ASL
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x02, 0x85, 0xFF, 0x06, 0xFF });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         ASL   BRK
+        &[_]u8{ 0xA9, 0x02, 0x85, 0xFF, 0x06, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(4, cpu.mem_read(0xFF));
     try std.testing.expect(!cpu.status.carry_flag);
 }
 
 test "0x4A: LSR Logical Shift Right - Accumulator" {
-    var cpu = CPU.init();
-    //                       LDA         LSR
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x02, 0x4A });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         LSR   BRK
+        &[_]u8{ 0xA9, 0x02, 0x4A, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(1, cpu.register_a);
     try std.testing.expect(!cpu.status.carry_flag);
 
-    //                       LDA         LSR
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x03, 0x4A });
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         LSR   BRK
+        &[_]u8{ 0xA9, 0x03, 0x4A, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
 
-    try std.testing.expectEqual(1, cpu.register_a);
-    try std.testing.expect(cpu.status.carry_flag);
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
+
+    try std.testing.expectEqual(1, cpu2.register_a);
+    try std.testing.expect(cpu2.status.carry_flag);
 }
 
 test "0x46: LSR Logical Shift Right - read value from memory" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LSR
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x02, 0x85, 0xFF, 0x46, 0xFF });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LSR   BRK
+        &[_]u8{ 0xA9, 0x02, 0x85, 0xFF, 0x46, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(1, cpu.mem_read(0xFF));
     try std.testing.expect(!cpu.status.carry_flag);
 
-    //                       LDA         STA         LSR
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x03, 0x85, 0xFF, 0x46, 0xFF });
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LSR   BRK
+        &[_]u8{ 0xA9, 0x03, 0x85, 0xFF, 0x46, 0xFF, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
 
-    try std.testing.expectEqual(1, cpu.mem_read(0xFF));
-    try std.testing.expect(cpu.status.carry_flag);
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
+
+    try std.testing.expectEqual(1, cpu2.mem_read(0xFF));
+    try std.testing.expect(cpu2.status.carry_flag);
 }
 
 test "0x09: ORA Logical Inclusive OR" {
-    var cpu = CPU.init();
-    //                       LDA         ORA
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x02, 0x09, 0xFF });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ORA   BRK
+        &[_]u8{ 0xA9, 0x02, 0x09, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0xFF, cpu.register_a);
 }
 
 test "0x2A: ROL Rotate Left" {
-    var cpu = CPU.init();
-    //                       LDA         SEC   ROL
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x38, 0x2A });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         SEC   ROL   BRK
+        &[_]u8{ 0xA9, 0x01, 0x38, 0x2A, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(3, cpu.register_a);
     try std.testing.expect(!cpu.status.carry_flag);
     try std.testing.expect(!cpu.status.zero_flag);
     try std.testing.expect(!cpu.status.negative_flag);
 
-    //                       LDA         ROL
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x80, 0x2A });
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ROL   BRK
+        &[_]u8{ 0xA9, 0x80, 0x2A, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
 
-    try std.testing.expectEqual(0, cpu.register_a);
-    try std.testing.expect(cpu.status.carry_flag);
-    try std.testing.expect(cpu.status.zero_flag);
-    try std.testing.expect(!cpu.status.negative_flag);
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
 
-    //                       LDA         ROL
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x40, 0x2A });
+    try std.testing.expectEqual(0, cpu2.register_a);
+    try std.testing.expect(cpu2.status.carry_flag);
+    try std.testing.expect(cpu2.status.zero_flag);
+    try std.testing.expect(!cpu2.status.negative_flag);
 
-    try std.testing.expectEqual(0x80, cpu.register_a);
-    try std.testing.expect(!cpu.status.carry_flag);
-    try std.testing.expect(!cpu.status.zero_flag);
-    try std.testing.expect(cpu.status.negative_flag);
+    const test_rom3 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ROL   BRK
+        &[_]u8{ 0xA9, 0x40, 0x2A, 0x00 },
+    );
+    const bus3 = Bus.init(try Rom.load(test_rom3));
+    defer allocator.free(test_rom3);
+
+    var cpu3 = CPU.init(bus3);
+    cpu3.run();
+
+    try std.testing.expectEqual(0x80, cpu3.register_a);
+    try std.testing.expect(!cpu3.status.carry_flag);
+    try std.testing.expect(!cpu3.status.zero_flag);
+    try std.testing.expect(cpu3.status.negative_flag);
 }
 
 test "0x26: ROL Rotate Left - read value from memory" {
-    var cpu = CPU.init();
-    //                       LDA         STA         SEC   ROL
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0x38, 0x26, 0xFF });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         SEC   ROL   BRK
+        &[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0x38, 0x26, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(3, cpu.mem_read(0xFF));
     try std.testing.expect(!cpu.status.carry_flag);
     try std.testing.expect(!cpu.status.zero_flag);
     try std.testing.expect(!cpu.status.negative_flag);
 
-    //                       LDA         STA         ROL
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x80, 0x85, 0xFF, 0x26, 0xFF });
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         ROL   BRK
+        &[_]u8{ 0xA9, 0x80, 0x85, 0xFF, 0x26, 0xFF, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
 
-    try std.testing.expectEqual(0, cpu.mem_read(0xFF));
-    try std.testing.expect(cpu.status.carry_flag);
-    try std.testing.expect(cpu.status.zero_flag);
-    try std.testing.expect(!cpu.status.negative_flag);
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
+
+    try std.testing.expectEqual(0, cpu2.mem_read(0xFF));
+    try std.testing.expect(cpu2.status.carry_flag);
+    try std.testing.expect(cpu2.status.zero_flag);
+    try std.testing.expect(!cpu2.status.negative_flag);
 }
 
 test "0x6A: ROR Rotate Right" {
-    var cpu = CPU.init();
-    //                       LDA         SEC   ROR
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x38, 0x6A });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         SEC   ROR   BRK
+        &[_]u8{ 0xA9, 0x01, 0x38, 0x6A, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x80, cpu.register_a);
     try std.testing.expect(cpu.status.carry_flag);
     try std.testing.expect(cpu.status.negative_flag);
     try std.testing.expect(!cpu.status.zero_flag);
 
-    //                       LDA         ROR
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x1, 0x6A });
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ROR   BRK
+        &[_]u8{ 0xA9, 0x1, 0x6A, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
 
-    try std.testing.expectEqual(0, cpu.register_a);
-    try std.testing.expect(cpu.status.carry_flag);
-    try std.testing.expect(cpu.status.zero_flag);
-    try std.testing.expect(!cpu.status.negative_flag);
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
 
-    //                       LDA         ROR
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x80, 0x6A });
+    try std.testing.expectEqual(0, cpu2.register_a);
+    try std.testing.expect(cpu2.status.carry_flag);
+    try std.testing.expect(cpu2.status.zero_flag);
+    try std.testing.expect(!cpu2.status.negative_flag);
 
-    try std.testing.expectEqual(0x40, cpu.register_a);
-    try std.testing.expect(!cpu.status.carry_flag);
-    try std.testing.expect(!cpu.status.zero_flag);
-    try std.testing.expect(!cpu.status.negative_flag);
+    const test_rom3 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ROR   BRK
+        &[_]u8{ 0xA9, 0x80, 0x6A, 0x00 },
+    );
+    const bus3 = Bus.init(try Rom.load(test_rom3));
+    defer allocator.free(test_rom3);
+
+    var cpu3 = CPU.init(bus3);
+    cpu3.run();
+
+    try std.testing.expectEqual(0x40, cpu3.register_a);
+    try std.testing.expect(!cpu3.status.carry_flag);
+    try std.testing.expect(!cpu3.status.zero_flag);
+    try std.testing.expect(!cpu3.status.negative_flag);
 }
 
 test "0x66: ROR Rotate Right - Read Value from Memory" {
-    var cpu = CPU.init();
-    //                       LDA         STA         SEC   ROR
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0x38, 0x66, 0xFF });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         SEC   ROR   BRK
+        &[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0x38, 0x66, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x80, cpu.mem_read(0xFF));
     try std.testing.expect(cpu.status.carry_flag);
     try std.testing.expect(cpu.status.negative_flag);
     try std.testing.expect(!cpu.status.zero_flag);
 
-    //                       LDA        STA         ROR
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x1, 0x85, 0xFF, 0x66, 0xFF });
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA        STA         ROR   BRK
+        &[_]u8{ 0xA9, 0x1, 0x85, 0xFF, 0x66, 0xFF, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
 
-    try std.testing.expectEqual(0, cpu.mem_read(0xFF));
-    try std.testing.expect(cpu.status.carry_flag);
-    try std.testing.expect(cpu.status.zero_flag);
-    try std.testing.expect(!cpu.status.negative_flag);
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
 
-    //                       LDA         STA         ROR
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x80, 0x85, 0xFF, 0x66, 0xFF });
+    try std.testing.expectEqual(0, cpu2.mem_read(0xFF));
+    try std.testing.expect(cpu2.status.carry_flag);
+    try std.testing.expect(cpu2.status.zero_flag);
+    try std.testing.expect(!cpu2.status.negative_flag);
 
-    try std.testing.expectEqual(0x40, cpu.mem_read(0xFF));
-    try std.testing.expect(!cpu.status.carry_flag);
-    try std.testing.expect(!cpu.status.zero_flag);
-    try std.testing.expect(!cpu.status.negative_flag);
+    const test_rom3 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         ROR   BRK
+        &[_]u8{ 0xA9, 0x80, 0x85, 0xFF, 0x66, 0xFF, 0x00 },
+    );
+    const bus3 = Bus.init(try Rom.load(test_rom3));
+    defer allocator.free(test_rom3);
+
+    var cpu3 = CPU.init(bus3);
+    cpu3.run();
+
+    try std.testing.expectEqual(0x40, cpu3.mem_read(0xFF));
+    try std.testing.expect(!cpu3.status.carry_flag);
+    try std.testing.expect(!cpu3.status.zero_flag);
+    try std.testing.expect(!cpu3.status.negative_flag);
 }
 
 test "0xD0: BNE jump if not equal - skip INX instruction" {
-    var cpu = CPU.init();
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         CMP         BNE         INX   BRK
+        &[_]u8{ 0xA9, 0x01, 0xC9, 0x03, 0xD0, 0x01, 0xE8, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
     cpu.mem_write(0x10, 0x55);
-    //                       LDA         CMP         BNE         INX   BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0xC9, 0x03, 0xD0, 0x01, 0xE8, 0x00 });
+    cpu.run();
 
     try std.testing.expectEqual(0, cpu.register_x);
 }
 
 test "0xD0: BNE jump if not equal - execute INX instruction" {
-    var cpu = CPU.init();
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         CMP         BNE         INX   BRK
+        &[_]u8{ 0xA9, 0x01, 0xC9, 0x01, 0xD0, 0x01, 0xE8, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
     cpu.mem_write(0x10, 0x55);
-    //                       LDA         CMP         BNE         INX   BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0xC9, 0x01, 0xD0, 0x01, 0xE8, 0x00 });
+    cpu.run();
 
     try std.testing.expectEqual(1, cpu.register_x);
 }
 
 test "0x90: BCC Branch if Carry Clear - branch" {
-    var cpu = CPU.init();
-    //                       LDA         ASL   BCC         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x0A, 0x90, 0x02, 0xA9, 0x03, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ASL   BCC         LDA         BRK
+        &[_]u8{ 0xA9, 0x01, 0x0A, 0x90, 0x02, 0xA9, 0x03, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 2 that means we did branch, otherwise we would have the value 3.
     try std.testing.expectEqual(2, cpu.register_a);
 }
 
 test "0x90: BCC Branch if Carry Clear - no branch" {
-    var cpu = CPU.init();
-    //                       LDA         ASL   BCC         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x80, 0x0A, 0x90, 0x02, 0xA9, 0x03, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ASL   BCC         LDA         BRK
+        &[_]u8{ 0xA9, 0x80, 0x0A, 0x90, 0x02, 0xA9, 0x03, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 3 that means we didn't branch, otherwise we would have the value 0.
     try std.testing.expectEqual(3, cpu.register_a);
 }
 
 test "0xB0: BCS Branch if Carry Set - branch" {
-    var cpu = CPU.init();
-    //                       LDA         ASL   BCS         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x80, 0x0A, 0xB0, 0x02, 0xA9, 0x03, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ASL   BCS         LDA         BRK
+        &[_]u8{ 0xA9, 0x80, 0x0A, 0xB0, 0x02, 0xA9, 0x03, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 0 that means we did branch, otherwise we would have the value 3.
     try std.testing.expectEqual(0, cpu.register_a);
 }
 
 test "0xB0: BCS Branch if Carry Set - no branch" {
-    var cpu = CPU.init();
-    //                       LDA         ASL   BCS         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x0A, 0xB0, 0x02, 0xA9, 0x03, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ASL   BCS         LDA         BRK
+        &[_]u8{ 0xA9, 0x01, 0x0A, 0xB0, 0x02, 0xA9, 0x03, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 3 that means we did branch, otherwise we would have the value 1.
     try std.testing.expectEqual(3, cpu.register_a);
 }
 
 test "0xF0: BEQ Branch if Equal - branch" {
-    var cpu = CPU.init();
-    //                       LDA         CMP         BEQ         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0xC9, 0x01, 0xF0, 0x02, 0xA9, 0x03, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         CMP         BEQ         LDA         BRK
+        &[_]u8{ 0xA9, 0x01, 0xC9, 0x01, 0xF0, 0x02, 0xA9, 0x03, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 1 that means we did branch, otherwise we would have the value 3.
     try std.testing.expectEqual(1, cpu.register_a);
 }
 
 test "0xF0: BEQ Branch if Equal - no branch" {
-    var cpu = CPU.init();
-    //                       LDA         CMP         BEQ         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0xC9, 0x02, 0xF0, 0x02, 0xA9, 0x03, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         CMP         BEQ         LDA         BRK
+        &[_]u8{ 0xA9, 0x01, 0xC9, 0x02, 0xF0, 0x02, 0xA9, 0x03, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 3 that means we did branch, otherwise we would have the value 1.
     try std.testing.expectEqual(3, cpu.register_a);
 }
 
 test "0x30: BMI Branch if Minus - branch" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         BIT         BMI         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x81, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x30, 0x02, 0xA9, 0x04, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LDA         BIT         BMI         LDA         BRK
+        &[_]u8{ 0xA9, 0x81, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x30, 0x02, 0xA9, 0x04, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 1 that means we did branch, otherwise we would have the value 4.
     try std.testing.expectEqual(1, cpu.register_a);
 }
 
 test "0x30: BMI Branch if Minus - no branch" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         BIT         BMI         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x30, 0x02, 0xA9, 0x04, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LDA         BIT         BMI         LDA         BRK
+        &[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x30, 0x02, 0xA9, 0x04, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 4 that means we didn't branch, otherwise we would have the value 1.
     try std.testing.expectEqual(4, cpu.register_a);
 }
 
 test "0x10: BPL Branch if Positive - no branch" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         BIT         BPL         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x81, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x10, 0x02, 0xA9, 0x04, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LDA         BIT         BPL         LDA         BRK
+        &[_]u8{ 0xA9, 0x81, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x10, 0x02, 0xA9, 0x04, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 4 that means we didn't branch, otherwise we would have the value 1.
     try std.testing.expectEqual(4, cpu.register_a);
 }
 
 test "0x10: BPL Branch if Positive - branch" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         BIT         BPL         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x10, 0x02, 0xA9, 0x04, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LDA         BIT         BPL         LDA         BRK
+        &[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x10, 0x02, 0xA9, 0x04, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 1 that means we did branch, otherwise we would have the value 4.
     try std.testing.expectEqual(1, cpu.register_a);
 }
 
 test "0x50: BVC Branch if Overflow Clear - no branch" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         BIT         BVC         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x40, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x50, 0x02, 0xA9, 0x04, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LDA         BIT         BVC         LDA         BRK
+        &[_]u8{ 0xA9, 0x40, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x50, 0x02, 0xA9, 0x04, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 4 that means we didn't branch, otherwise we would have the value 1.
     try std.testing.expectEqual(4, cpu.register_a);
 }
 
 test "0x50: BVC Branch if Overflow Clear  - branch" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         BIT         BVC         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x50, 0x02, 0xA9, 0x04, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LDA         BIT         BVC         LDA         BRK
+        &[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x50, 0x02, 0xA9, 0x04, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 1 that means we did branch, otherwise we would have the value 4.
     try std.testing.expectEqual(1, cpu.register_a);
 }
 
 test "0x70: BVS Branch if Overflow Set - branch" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         BIT         BVS         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x40, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x70, 0x02, 0xA9, 0x04, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LDA         BIT         BVS         LDA         BRK
+        &[_]u8{ 0xA9, 0x40, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x70, 0x02, 0xA9, 0x04, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 1 that means we did branch, otherwise we would have the value 4.
     try std.testing.expectEqual(1, cpu.register_a);
 }
 
 test "0x70: BVS Branch if Overflow Set - no branch" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         BIT         BVS         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x70, 0x02, 0xA9, 0x04, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LDA         BIT         BVS         LDA         BRK
+        &[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x70, 0x02, 0xA9, 0x04, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     // if the register A contains the value 4 that means we didn't branch, otherwise we would have the value 1.
     try std.testing.expectEqual(4, cpu.register_a);
 }
 
 test "0x24: BIT test - set N,V,Z flags" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         BIT         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0xC0, 0x85, 0xFF, 0xA9, 0x02, 0x24, 0xFF, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LDA         BIT         BRK
+        &[_]u8{ 0xA9, 0xC0, 0x85, 0xFF, 0xA9, 0x02, 0x24, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(2, cpu.register_a);
     try std.testing.expect(cpu.status.negative_flag);
@@ -1138,9 +1591,17 @@ test "0x24: BIT test - set N,V,Z flags" {
 }
 
 test "0x24: BIT test - set N,V flags" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         BIT         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0xC2, 0x85, 0xFF, 0xA9, 0x02, 0x24, 0xFF, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LDA         BIT         BRK
+        &[_]u8{ 0xA9, 0xC2, 0x85, 0xFF, 0xA9, 0x02, 0x24, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(2, cpu.register_a);
     try std.testing.expect(cpu.status.negative_flag);
@@ -1149,9 +1610,17 @@ test "0x24: BIT test - set N,V flags" {
 }
 
 test "0x24: BIT test - set N flags" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         BIT         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x81, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         LDA         BIT         BRK
+        &[_]u8{ 0xA9, 0x81, 0x85, 0xFF, 0xA9, 0x01, 0x24, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(1, cpu.register_a);
     try std.testing.expect(cpu.status.negative_flag);
@@ -1160,180 +1629,411 @@ test "0x24: BIT test - set N flags" {
 }
 
 test "0x18: CLC Clear Carry Flag" {
-    var cpu = CPU.init();
-    //                       LDA         ASL   CLC   BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x80, 0x0A, 0x18, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ASL   CLC   BRK
+        &[_]u8{ 0xA9, 0x80, 0x0A, 0x18, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expect(!cpu.status.carry_flag);
 }
 
 test "0xF8: SED Set Decimal Flag" {
-    var cpu = CPU.init();
-    //                       SED   BRK
-    cpu.load_and_run(&[_]u8{ 0xF8, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      SED   BRK
+        &[_]u8{ 0xF8, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expect(cpu.status.decimal_mode);
 }
 
 test "0xD8: CLD Clear Decimal Flag" {
-    var cpu = CPU.init();
-    //                       SED   CLD   BRK
-    cpu.load_and_run(&[_]u8{ 0xF8, 0xD8, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      SED   CLD   BRK
+        &[_]u8{ 0xF8, 0xD8, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expect(!cpu.status.decimal_mode);
 }
 
 test "0x78: SEI Set Interrupt Disable" {
-    var cpu = CPU.init();
-    //                       SEI
-    cpu.load_and_run(&[_]u8{0x78});
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //     SEI   BRK
+        &[_]u8{ 0x78, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expect(cpu.status.interrupt_disable);
 }
 
 test "0x38: SEC Set Carry Flag" {
-    var cpu = CPU.init();
-    //                       SEC
-    cpu.load_and_run(&[_]u8{0x38});
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //     SEC   BRK
+        &[_]u8{ 0x38, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expect(cpu.status.carry_flag);
 }
 
 test "0x58: CLI Clear Interrupt Disable" {
-    var cpu = CPU.init();
-    //                       SEI   CLI   BRK
-    cpu.load_and_run(&[_]u8{ 0x78, 0x58, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      SEI   CLI   BRK
+        &[_]u8{ 0x78, 0x58, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expect(!cpu.status.interrupt_disable);
 }
 
 test "0xB8: CLV Clear Overflow Flag" {
-    var cpu = CPU.init();
-    //                       LDA         STA         BIT         CLV   BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0xC2, 0x85, 0xFF, 0x24, 0xFF, 0xB8, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         BIT         CLV   BRK
+        &[_]u8{ 0xA9, 0xC2, 0x85, 0xFF, 0x24, 0xFF, 0xB8, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expect(!cpu.status.overflow_flag);
 }
 
 test "0xA2: LDX Load X Register" {
-    var cpu = CPU.init();
-    //                       LDX         BRK
-    cpu.load_and_run(&[_]u8{ 0xA2, 0x01, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDX         BRK
+        &[_]u8{ 0xA2, 0x01, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expectEqual(1, cpu.register_x);
 }
 
 test "0xA0: LDY Load Y Register" {
-    var cpu = CPU.init();
-    //                       LDY         BRK
-    cpu.load_and_run(&[_]u8{ 0xA0, 0x01, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDY         BRK
+        &[_]u8{ 0xA0, 0x01, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expectEqual(1, cpu.register_y);
 }
 
 test "0xE0: CPX Compare X Register" {
-    var cpu = CPU.init();
-    //                       LDX         CPX         BRK
-    cpu.load_and_run(&[_]u8{ 0xA2, 0x01, 0xE0, 0x01, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDX         CPX         BRK
+        &[_]u8{ 0xA2, 0x01, 0xE0, 0x01, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expect(cpu.status.zero_flag);
     try std.testing.expect(cpu.status.carry_flag);
 
-    //                       LDX         CPX         BRK
-    cpu.load_and_run(&[_]u8{ 0xA2, 0x01, 0xE0, 0x02, 0x00 });
-    try std.testing.expect(cpu.status.negative_flag);
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDX         CPX         BRK
+        &[_]u8{ 0xA2, 0x01, 0xE0, 0x02, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
+
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
+
+    try std.testing.expect(cpu2.status.negative_flag);
 }
 
 test "0xC0: CPY Compare Y Register" {
-    var cpu = CPU.init();
-    //                       LDY         CPY         BRK
-    cpu.load_and_run(&[_]u8{ 0xA0, 0x01, 0xC0, 0x01, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDY         CPY         BRK
+        &[_]u8{ 0xA0, 0x01, 0xC0, 0x01, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expect(cpu.status.zero_flag);
     try std.testing.expect(cpu.status.carry_flag);
 
-    //                       LDY         CPY         BRK
-    cpu.load_and_run(&[_]u8{ 0xA0, 0x01, 0xC0, 0x02, 0x00 });
-    try std.testing.expect(cpu.status.negative_flag);
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDY         CPY         BRK
+        &[_]u8{ 0xA0, 0x01, 0xC0, 0x02, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
+
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
+
+    try std.testing.expect(cpu2.status.negative_flag);
 }
 
 test "0xC6: DEC Decrement Memory" {
-    var cpu = CPU.init();
-    //                       LDA         STA         DEC         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0xC6, 0xFF, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         DEC         BRK
+        &[_]u8{ 0xA9, 0x01, 0x85, 0xFF, 0xC6, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expect(cpu.status.zero_flag);
     try std.testing.expect(!cpu.status.negative_flag);
     try std.testing.expectEqual(0, cpu.mem_read(0xff));
 
-    //                       LDA         STA         DEC         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x02, 0x85, 0xFF, 0xC6, 0xFF, 0x00 });
-    try std.testing.expect(!cpu.status.zero_flag);
-    try std.testing.expect(!cpu.status.negative_flag);
-    try std.testing.expectEqual(1, cpu.mem_read(0xff));
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         DEC         BRK
+        &[_]u8{ 0xA9, 0x02, 0x85, 0xFF, 0xC6, 0xFF, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
 
-    //                       LDA         STA         DEC         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x81, 0x85, 0xFF, 0xC6, 0xFF, 0x00 });
-    try std.testing.expect(!cpu.status.zero_flag);
-    try std.testing.expect(cpu.status.negative_flag);
-    try std.testing.expectEqual(0x80, cpu.mem_read(0xff));
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
+
+    try std.testing.expect(!cpu2.status.zero_flag);
+    try std.testing.expect(!cpu2.status.negative_flag);
+    try std.testing.expectEqual(1, cpu2.mem_read(0xff));
+
+    const test_rom3 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         DEC         BRK
+        &[_]u8{ 0xA9, 0x81, 0x85, 0xFF, 0xC6, 0xFF, 0x00 },
+    );
+    const bus3 = Bus.init(try Rom.load(test_rom3));
+    defer allocator.free(test_rom3);
+
+    var cpu3 = CPU.init(bus3);
+    cpu3.run();
+
+    try std.testing.expect(!cpu3.status.zero_flag);
+    try std.testing.expect(cpu3.status.negative_flag);
+    try std.testing.expectEqual(0x80, cpu3.mem_read(0xff));
 }
 
 test "0xCA: DEX Decrement X Register" {
-    var cpu = CPU.init();
-    //                       LDX         DEX   BRK
-    cpu.load_and_run(&[_]u8{ 0xA2, 0x02, 0xCA, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDX         DEX   BRK
+        &[_]u8{ 0xA2, 0x02, 0xCA, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expect(!cpu.status.zero_flag);
     try std.testing.expect(!cpu.status.negative_flag);
     try std.testing.expectEqual(1, cpu.register_x);
 
-    //                       LDX         DEX   BRK
-    cpu.load_and_run(&[_]u8{ 0xA2, 0x01, 0xCA, 0x00 });
-    try std.testing.expect(cpu.status.zero_flag);
-    try std.testing.expect(!cpu.status.negative_flag);
-    try std.testing.expectEqual(0, cpu.register_x);
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDX         DEX   BRK
+        &[_]u8{ 0xA2, 0x01, 0xCA, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
 
-    //                       LDX         DEX   BRK
-    cpu.load_and_run(&[_]u8{ 0xA2, 0x81, 0xCA, 0x00 });
-    try std.testing.expect(!cpu.status.zero_flag);
-    try std.testing.expect(cpu.status.negative_flag);
-    try std.testing.expectEqual(0x80, cpu.register_x);
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
 
-    //                       LDX         DEX   BRK
-    cpu.load_and_run(&[_]u8{ 0xA2, 0x00, 0xCA, 0x00 });
-    try std.testing.expect(!cpu.status.zero_flag);
-    try std.testing.expect(cpu.status.negative_flag);
-    try std.testing.expectEqual(0xFF, cpu.register_x);
+    try std.testing.expect(cpu2.status.zero_flag);
+    try std.testing.expect(!cpu2.status.negative_flag);
+    try std.testing.expectEqual(0, cpu2.register_x);
+
+    const test_rom3 = try rom.TestRom.testRom(
+        allocator,
+        //      LDX         DEX   BRK
+        &[_]u8{ 0xA2, 0x81, 0xCA, 0x00 },
+    );
+    const bus3 = Bus.init(try Rom.load(test_rom3));
+    defer allocator.free(test_rom3);
+
+    var cpu3 = CPU.init(bus3);
+    cpu3.run();
+
+    try std.testing.expect(!cpu3.status.zero_flag);
+    try std.testing.expect(cpu3.status.negative_flag);
+    try std.testing.expectEqual(0x80, cpu3.register_x);
+
+    const test_rom4 = try rom.TestRom.testRom(
+        allocator,
+        //      LDX         DEX   BRK
+        &[_]u8{ 0xA2, 0x00, 0xCA, 0x00 },
+    );
+    const bus4 = Bus.init(try Rom.load(test_rom4));
+    defer allocator.free(test_rom4);
+
+    var cpu4 = CPU.init(bus4);
+    cpu4.run();
+
+    try std.testing.expect(!cpu4.status.zero_flag);
+    try std.testing.expect(cpu4.status.negative_flag);
+    try std.testing.expectEqual(0xFF, cpu4.register_x);
 }
 
 test "0x88: DEY Decrement Y Register" {
-    var cpu = CPU.init();
-    //                       LDY         DEY   BRK
-    cpu.load_and_run(&[_]u8{ 0xA0, 0x02, 0x88, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDY         DEY   BRK
+        &[_]u8{ 0xA0, 0x02, 0x88, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expect(!cpu.status.zero_flag);
     try std.testing.expect(!cpu.status.negative_flag);
     try std.testing.expectEqual(1, cpu.register_y);
 
-    //                       LDY         DEY   BRK
-    cpu.load_and_run(&[_]u8{ 0xA0, 0x01, 0x88, 0x00 });
-    try std.testing.expect(cpu.status.zero_flag);
-    try std.testing.expect(!cpu.status.negative_flag);
-    try std.testing.expectEqual(0, cpu.register_y);
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDY         DEY   BRK
+        &[_]u8{ 0xA0, 0x01, 0x88, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
 
-    //                       LDY         DEY   BRK
-    cpu.load_and_run(&[_]u8{ 0xA0, 0x81, 0x88, 0x00 });
-    try std.testing.expect(!cpu.status.zero_flag);
-    try std.testing.expect(cpu.status.negative_flag);
-    try std.testing.expectEqual(0x80, cpu.register_y);
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
+
+    try std.testing.expect(cpu2.status.zero_flag);
+    try std.testing.expect(!cpu2.status.negative_flag);
+    try std.testing.expectEqual(0, cpu2.register_y);
+
+    const test_rom3 = try rom.TestRom.testRom(
+        allocator,
+        //      LDY         DEY   BRK
+        &[_]u8{ 0xA0, 0x81, 0x88, 0x00 },
+    );
+    const bus3 = Bus.init(try Rom.load(test_rom3));
+    defer allocator.free(test_rom3);
+
+    var cpu3 = CPU.init(bus3);
+    cpu3.run();
+
+    try std.testing.expect(!cpu3.status.zero_flag);
+    try std.testing.expect(cpu3.status.negative_flag);
+    try std.testing.expectEqual(0x80, cpu3.register_y);
 }
 
 test "0x49: EOR Exclusive OR" {
-    var cpu = CPU.init();
-    //                       LDA         EOR         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x49, 0x01, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         EOR         BRK
+        &[_]u8{ 0xA9, 0x01, 0x49, 0x01, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expect(cpu.status.zero_flag);
     try std.testing.expect(!cpu.status.negative_flag);
 
-    //                       LDA         EOR         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x49, 0x80, 0x00 });
-    try std.testing.expect(!cpu.status.zero_flag);
-    try std.testing.expect(cpu.status.negative_flag);
+    const test_rom2 = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         EOR         BRK
+        &[_]u8{ 0xA9, 0x01, 0x49, 0x80, 0x00 },
+    );
+    const bus2 = Bus.init(try Rom.load(test_rom2));
+    defer allocator.free(test_rom2);
+
+    var cpu2 = CPU.init(bus2);
+    cpu2.run();
+
+    try std.testing.expect(!cpu2.status.zero_flag);
+    try std.testing.expect(cpu2.status.negative_flag);
 }
 
 test "0xE8: INX increments X register by 1" {
-    var cpu = CPU.init();
-    //                       LDA         TAX   INX   BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0xAA, 0xE8, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         TAX   INX   BRK
+        &[_]u8{ 0xA9, 0x01, 0xAA, 0xE8, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(2, cpu.register_x);
     try std.testing.expect(!cpu.status.zero_flag);
@@ -1341,35 +2041,72 @@ test "0xE8: INX increments X register by 1" {
 }
 
 test "0xE6: INC Increment Memory" {
-    var cpu = CPU.init();
-    //                       LDA         STA         INC         LDA         BRK
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x85, 0x10, 0xE6, 0x49, 0xA5, 0x10, 0x00 });
-    try std.testing.expectEqual(1, cpu.register_a);
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA         INC         LDA         BRK
+        &[_]u8{ 0xA9, 0x01, 0x85, 0x10, 0xE6, 0x10, 0xA5, 0x10, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
+    try std.testing.expectEqual(2, cpu.register_a);
     try std.testing.expect(!cpu.status.zero_flag);
     try std.testing.expect(!cpu.status.negative_flag);
 }
 
 test "0xC8: INY Increment Y Register" {
-    var cpu = CPU.init();
-    //                       LDY         INY   BRK
-    cpu.load_and_run(&[_]u8{ 0xA0, 0x01, 0xC8, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDY         INY   BRK
+        &[_]u8{ 0xA0, 0x01, 0xC8, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
     try std.testing.expectEqual(2, cpu.register_y);
     try std.testing.expect(!cpu.status.zero_flag);
     try std.testing.expect(!cpu.status.negative_flag);
 }
 
 test "0x6C: JMP Jump to address" {
-    var cpu = CPU.init();
-    //                       LDA         STA         LDA         STA         JMP               LDA
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x85, 0xF0, 0xA9, 0xCC, 0x85, 0xF1, 0x6C, 0xF0, 0x00, 0xA9, 0x69 });
-    try std.testing.expectEqual(0xCC01, cpu.pc);
-    try std.testing.expectEqual(0xCC, cpu.register_a);
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         JMP               LDA         BRK
+        &[_]u8{ 0xA9, 0x42, 0x6C, 0x11, 0x11, 0xA9, 0x69, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.mem_write_u16(0x1111, 0x8007);
+    cpu.run();
+
+    try std.testing.expectEqual(0x8008, cpu.pc);
+    // if the register A contains the value 0x42 that means we jumped, otherwise we would have the value 0x69.
+    try std.testing.expectEqual(0x42, cpu.register_a);
 }
 
 test "0x48: PHA Push Accumulator to Stack" {
-    var cpu = CPU.init();
-    //                       LDA         PHA   LDA         PHA   LDA         PHA
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x48, 0xA9, 0x02, 0x48, 0xA9, 0x03, 0x48 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         PHA   LDA         PHA   LDA         PHA   BRK
+        &[_]u8{ 0xA9, 0x01, 0x48, 0xA9, 0x02, 0x48, 0xA9, 0x03, 0x48, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x03, cpu.stack_pop());
     try std.testing.expectEqual(0x02, cpu.stack_pop());
@@ -1377,36 +2114,67 @@ test "0x48: PHA Push Accumulator to Stack" {
 }
 
 test "0x68: PLA Pop Accumulator from Stack" {
-    var cpu = CPU.init();
-    //                       LDA         PHA   LDA         PLA
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x01, 0x48, 0xA9, 0x02, 0x68 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         PHA   LDA         PLA   BRK
+        &[_]u8{ 0xA9, 0x01, 0x48, 0xA9, 0x02, 0x68, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x01, cpu.register_a);
 }
 
 test "0x20: JSR Jump to Subroutine" {
-    var cpu = CPU.init();
-    //                       JSR               LDX         LDX         BRK   LDX
-    cpu.load_and_run(&[_]u8{ 0x20, 0x05, 0x00, 0xA2, 0x01, 0xA2, 0x02, 0x00, 0xA2, 0x03 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      JSR               LDX         LDX         BRK   LDX   BRK
+        &[_]u8{ 0x20, 0x05, 0x80, 0xA2, 0x01, 0xA2, 0x02, 0x00, 0xA2, 0x03, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(2, cpu.register_x);
-    try std.testing.expectEqual(0x0008, cpu.pc);
+    try std.testing.expectEqual(0x8008, cpu.pc);
 }
 
 test "0x60: RTS Return from Subroutine" {
-    var cpu = CPU.init();
-    //                       JSR               JSR               JSR               LDX         RTS   INX   RTS   BRK
-    cpu.load_and_run(&[_]u8{ 0x20, 0x09, 0x00, 0x20, 0x0C, 0x00, 0x20, 0x0E, 0x00, 0xA2, 0x00, 0x60, 0xE8, 0x60, 0x00 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      JSR               JSR               JSR               LDX         RTS   INX   RTS   BRK
+        &[_]u8{ 0x20, 0x09, 0x80, 0x20, 0x0C, 0x80, 0x20, 0x0E, 0x80, 0xA2, 0x00, 0x60, 0xE8, 0x60, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(1, cpu.register_x);
-    try std.testing.expectEqual(0x000f, cpu.pc);
+    try std.testing.expectEqual(0x800F, cpu.pc);
 }
 
 // FIX
 // test "0x40: RTI Return from Interrupt" {
-//     var cpu = CPU.init();
+//     const allocator = std.testing.allocator;
+//     const test_rom = try rom.TestRom.testRom(
+//         allocator,
+//         //     RTI   BRK
+//         &[_]u8{0x40, 0x00},
+//     );
+//     const bus = Bus.init(try Rom.load(test_rom));
+//     defer allocator.free(test_rom);
 //
-//     cpu.pc = PROGRAM_START_ADDR;
+//     var cpu = CPU.init(bus);
 //     cpu.status.carry_flag = true;
 //     cpu.status.negative_flag = true;
 //
@@ -1415,8 +2183,6 @@ test "0x60: RTS Return from Subroutine" {
 //     cpu.stack_push(@bitCast(cpu.status));
 //     std.debug.print("AFTER SECOND PUSH: {any}\n", .{cpu.memory[0x0100..0x01FF]});
 //
-//     //                      RTI
-//     cpu.load(&[_]u8{0x40});
 //     cpu.run();
 //
 //     try std.testing.expect(cpu.status.carry_flag);
@@ -1425,9 +2191,17 @@ test "0x60: RTS Return from Subroutine" {
 // }
 
 test "0x08: PHP Push Processor Status" {
-    var cpu = CPU.init();
-    //                       SED   SEI   PHP
-    cpu.load_and_run(&[_]u8{ 0xF8, 0x78, 0x08 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      SED   SEI   PHP   BRK
+        &[_]u8{ 0xF8, 0x78, 0x08, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     const status: ProcessorStatus = @bitCast(cpu.stack_pop());
     try std.testing.expect(status.decimal_mode);
@@ -1435,34 +2209,66 @@ test "0x08: PHP Push Processor Status" {
 }
 
 test "0x28: PLP Pull Processor Status" {
-    var cpu = CPU.init();
-    //                       SED   SEI   PHP   PLP
-    cpu.load_and_run(&[_]u8{ 0xF8, 0x78, 0x08, 0x28 });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      SED   SEI   PHP   PLP   BRK
+        &[_]u8{ 0xF8, 0x78, 0x08, 0x28, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expect(cpu.status.decimal_mode);
     try std.testing.expect(cpu.status.interrupt_disable);
 }
 
 test "0x85: STA Store Accumulator" {
-    var cpu = CPU.init();
-    //                       LDA         STA
-    cpu.load_and_run(&[_]u8{ 0xA9, 0x69, 0x85, 0xFF });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         STA   BRK
+        &[_]u8{ 0xA9, 0x69, 0x85, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x69, cpu.mem_read(0x00FF));
 }
 
 test "0x86: STX Store X Register" {
-    var cpu = CPU.init();
-    //                       LDX         STX
-    cpu.load_and_run(&[_]u8{ 0xA2, 0x69, 0x86, 0xFF });
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDX         STX   BRK
+        &[_]u8{ 0xA2, 0x69, 0x86, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x69, cpu.mem_read(0x00FF));
 }
 
-test "0x84: STX Store X Register" {
-    var cpu = CPU.init();
-    //                       LDY         STY
-    cpu.load_and_run(&[_]u8{ 0xA0, 0x69, 0x84, 0xFF });
+test "0x84: STY Store Y Register" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDY         STY         BRK
+        &[_]u8{ 0xA0, 0x69, 0x84, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
 
     try std.testing.expectEqual(0x69, cpu.mem_read(0x00FF));
 }
