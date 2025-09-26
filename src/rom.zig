@@ -11,6 +11,7 @@ pub const Mirroring = enum {
 };
 
 pub const Rom = struct {
+    /// PRG ROM is mapped to address `0x8000..0x10000`.
     prg_rom: []u8,
     chr_rom: []u8,
     mapper: u8,

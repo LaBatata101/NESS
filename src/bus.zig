@@ -2,11 +2,18 @@ const std = @import("std");
 const Rom = @import("rom.zig").Rom;
 
 const RAM: u16 = 0x0000;
-const RAM_MIRRORS_END: u16 = 0x1FFF;
+const RAM_MIRRORS_END: u16 = 0x2000;
 const PPU_REGISTERS: u16 = 0x2000;
-const PPU_REGISTERS_MIRRORS_END: u16 = 0x3FFF;
+const PPU_REGISTERS_MIRRORS_END: u16 = 0x4000;
 
 pub const Bus = struct {
+    /// The CPU has `0x0000..0x2000` addressing space reserved for RAM space. The RAM address
+    /// space `0x000..0x0800` (2KiB) is mirrored three times:
+    /// - `0x800..0x1000`
+    /// - `0x1000..0x1800`
+    /// - `0x1800..0x2000`
+    /// This means that there is no difference in accessing memory addresses at `0x0000` or `0x0800` or
+    /// `0x1000` or `0x1800` for reads or writes.
     ram: [2048]u8,
     rom: Rom,
 
@@ -17,13 +24,13 @@ pub const Bus = struct {
     }
 
     pub fn mem_read(self: Self, addr: u16) u8 {
-        if (addr >= RAM and addr <= RAM_MIRRORS_END) {
+        if (addr >= RAM and addr < RAM_MIRRORS_END) {
             const mirror_down_addr = addr & 0b00000111_11111111;
             return self.ram[mirror_down_addr];
-        } else if (addr >= PPU_REGISTERS and addr <= PPU_REGISTERS_MIRRORS_END) {
+        } else if (addr >= PPU_REGISTERS and addr < PPU_REGISTERS_MIRRORS_END) {
             _ = addr & 0b00100000_00000111;
             @panic("PPU not supported yet!");
-        } else if (addr >= 0x8000 and addr <= 0xFFFF) {
+        } else if (addr >= 0x8000 and addr < 0x10000) {
             return self.read_prg_rom(addr);
         } else {
             std.log.info("Ignoring mem read at 0x{X:04}", .{addr});
@@ -58,6 +65,8 @@ pub const Bus = struct {
         self.mem_write(addr + 1, hi);
     }
 
+    // PRG Rom Size might be 16 KiB or 32 KiB. Because `0x8000..0x10000` mapped region is 32 KiB of addressable space,
+    // the upper 16 KiB needs to be mapped to the lower 16 KiB (if a game has only 16 KiB of PRG ROM)
     fn read_prg_rom(self: Self, addr: u16) u8 {
         var new_addr = addr - 0x8000;
         // Check if the PRG Rom Size is 16 KiB and we're trying to access memory pass the 16 KiB.
