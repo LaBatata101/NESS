@@ -841,7 +841,7 @@ pub const OP_CODES = [_]OpCode{
     },
 
     .{
-        .RTS = .{ .code = 0x60, .size = 1, .cycles = 6, .addressing_mode = AdressingMode.Absolute }
+        .RTS = .{ .code = 0x60, .size = 1, .cycles = 6, .addressing_mode = AdressingMode.Implicit }
     },
     .{
         .RTI = .{ .code = 0x40, .size = 1, .cycles = 6, .addressing_mode = AdressingMode.Implicit }
