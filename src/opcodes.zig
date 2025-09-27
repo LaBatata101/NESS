@@ -756,7 +756,7 @@ pub const OP_CODES = [_]OpCode{
         .LDY = .{ .code = 0xB4, .size = 2, .cycles = 4, .addressing_mode = AdressingMode.ZeroPageX } 
     },
     .{
-        .LDY = .{ .code = 0xAC, .size = 3, .cycles = 4, .addressing_mode = AdressingMode.Immediate } 
+        .LDY = .{ .code = 0xAC, .size = 3, .cycles = 4, .addressing_mode = AdressingMode.Absolute } 
     },
     .{
         .LDY = .{ .code = 0xBC, .size = 3, .cycles = 4, // (+1 if page crossed)
