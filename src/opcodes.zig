@@ -656,7 +656,7 @@ pub const OP_CODES = [_]OpCode{
         .ORA = .{ .code = 0x01, .size = 2, .cycles = 6, .addressing_mode = AdressingMode.IndirectX }
     },
     .{
-        .ORA = .{ .code = 0x11, .size = 3, .cycles = 5, // (+1 if page crossed)
+        .ORA = .{ .code = 0x11, .size = 2, .cycles = 5, // (+1 if page crossed)
             .addressing_mode = AdressingMode.IndirectY }
     },
 
