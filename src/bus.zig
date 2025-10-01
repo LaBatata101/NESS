@@ -6,6 +6,33 @@ const RAM_MIRRORS_END: u16 = 0x2000;
 const PPU_REGISTERS: u16 = 0x2000;
 const PPU_REGISTERS_MIRRORS_END: u16 = 0x4000;
 
+//  _______________ $10000  _______________
+// | PRG-ROM       |       |               |
+// | Upper Bank    |       |               |
+// |_ _ _ _ _ _ _ _| $C000 | PRG-ROM       |
+// | PRG-ROM       |       |               |
+// | Lower Bank    |       |               |
+// |_______________| $8000 |_______________|
+// | SRAM          |       | SRAM          |
+// |_______________| $6000 |_______________|
+// | Expansion ROM |       | Expansion ROM |
+// |_______________| $4020 |_______________|
+// | I/O Registers |       |               |
+// |_ _ _ _ _ _ _ _| $4000 |               |
+// | Mirrors       |       | I/O Registers |
+// | $2000-$2007   |       |               |
+// |_ _ _ _ _ _ _ _| $2008 |               |
+// | I/O Registers |       |               |
+// |_______________| $2000 |_______________|
+// | Mirrors       |       |               |
+// | $0000-$07FF   |       |               |
+// |_ _ _ _ _ _ _ _| $0800 |               |
+// | RAM           |       | RAM           |
+// |_ _ _ _ _ _ _ _| $0200 |               |
+// | Stack         |       |               |
+// |_ _ _ _ _ _ _ _| $0100 |               |
+// | Zero Page     |       |               |
+// |_______________| $0000 |_______________|
 pub const Bus = struct {
     /// The CPU has `0x0000..0x2000` addressing space reserved for RAM space. The RAM address
     /// space `0x000..0x0800` (2KiB) is mirrored three times:
@@ -29,11 +56,12 @@ pub const Bus = struct {
             return self.ram[mirror_down_addr];
         } else if (addr >= PPU_REGISTERS and addr < PPU_REGISTERS_MIRRORS_END) {
             _ = addr & 0b00100000_00000111;
-            @panic("PPU not supported yet!");
+            std.log.warn("PPU not supported yet!", .{});
+            return 0;
         } else if (addr >= 0x8000 and addr < 0x10000) {
             return self.read_prg_rom(addr);
         } else {
-            std.log.info("Ignoring mem read at 0x{X:04}", .{addr});
+            std.log.warn("Ignoring mem read at 0x{X:04}", .{addr});
             return 0;
         }
     }
@@ -44,11 +72,11 @@ pub const Bus = struct {
             self.ram[mirror_down_addr] = data;
         } else if (addr >= PPU_REGISTERS and addr <= PPU_REGISTERS_MIRRORS_END) {
             _ = addr & 0b00100000_00000111;
-            @panic("PPU not supported yet!");
+            std.log.warn("PPU not supported yet!", .{});
         } else if (addr >= 0x8000 and addr <= 0xFFFF) {
             @panic("Attempt to write to cartridge ROM memory space");
         } else {
-            std.log.info("Ignoring mem write at 0x{X:04}", .{addr});
+            std.log.warn("Ignoring mem write at 0x{X:04}", .{addr});
         }
     }
 

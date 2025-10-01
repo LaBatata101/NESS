@@ -37,7 +37,7 @@ pub const AdressingMode = enum {
     Absolute,
 
     /// The address to be accessed by an instruction using `X` register indexed absolute addressing is computed by
-    /// taking the `16 bit` address from the instruction and added the contents of the `X` register. For example if `X`
+    /// taking the `16 bit` address from the instruction and adding the contents of the `X` register. For example if `X`
     /// contains `$92` then an `STA $2000,X` instruction will store the accumulator at `$2092` (e.g. `$2000 + $92`).
     AbsoluteX,
 
@@ -80,7 +80,7 @@ const Instruction = struct {
     addressing_mode: AdressingMode,
 };
 
-const OpCode = union(enum) {
+pub const OpCode = union(enum) {
     /// *Add with Carry*:
     /// This instruction adds the contents of a memory location to the accumulator together with the carry bit. If
     /// overflow occurs the carry bit is set, this enables multiple byte addition to be performed.
@@ -339,6 +339,76 @@ const OpCode = union(enum) {
     /// counter to the next instruction.
     NOP: Instruction,
 
+    // UNOFFICIAL OPCODES:
+
+    /// *AND* byte with accumulator. If result is negative then carry is set.
+    ANC: Instruction,
+
+    /// *AND* X register with accumulator and store result in X register, then subtract byte from X register (without
+    /// borrow).
+    AXS: Instruction,
+
+    /// *AND* byte with accumulator, then rotate one bit right in accumulator.
+    ARR: Instruction,
+
+    /// *AND* byte with accumulator, then shift right one bit in accumulator.
+    ALR: Instruction,
+
+    /// *AND* byte with accumulator, then transfer accumulator to X register.
+    ATX: Instruction,
+
+    /// *AND* X register with accumulator then *AND* result with 7 and store in memory.
+    AXA: Instruction,
+
+    /// *AND* `X` register with accumulator and store result in memory.
+    SAX: Instruction,
+
+    /// Subtract 1 from memory (without borrow).
+    DCP: Instruction,
+
+    /// No operation (double NOP). The argument has no significance.
+    DOP: Instruction,
+
+    /// Increase memory by one, then subtract memory from accu-mulator (with borrow).
+    ISC: Instruction,
+
+    /// Stop program counter (halts the CPU).
+    KIL: Instruction,
+
+    /// *AND* memory with stack pointer, transfer result to accumulator, X register and stack pointer.
+    LAS: Instruction,
+
+    /// Load accumulator and X register with memory.
+    LAX: Instruction,
+
+    /// Rotate one bit left in memory, then AND accumulator with memory.
+    RLA: Instruction,
+
+    /// Rotate one bit right in memory, then add memory to accumulator (with carry).
+    RRA: Instruction,
+
+    /// Shift left one bit in memory, then OR accumulator with memory.
+    SLO: Instruction,
+
+    /// Shift right one bit in memory, then EOR accumulator with memory.
+    SRE: Instruction,
+
+    /// *AND* X register with the high byte of the target address of the argument + 1. Store the result in memory.
+    SXA: Instruction,
+
+    /// *AND* Y register with the high byte of the target address of the argument + 1. Store the result in memory.
+    SYA: Instruction,
+
+    /// No operation (tripple NOP). The argument has no signifi-cance.
+    TOP: Instruction,
+
+    /// Equivalent to TXA + AND #{imm}
+    XAA: Instruction,
+
+    /// AND X register with accumulator and store result in stack pointer, then AND stack pointer with the high byte of
+    /// the target address of the argument + 1. Store result in memory.
+    XAS: Instruction,
+
     pub fn code(self: @This()) u8 {
         switch (self) {
             inline else => |meta| return meta.code,
@@ -355,6 +425,21 @@ const OpCode = union(enum) {
         switch (self) {
             inline else => |meta| return meta.size,
         }
+    }
+
+    pub fn is_unofficial(self: @This()) bool {
+        return switch (self) {
+            // zig fmt: off
+            .ANC, .AXS, .ARR, .ALR, .ATX, .AXA, .SAX, .DCP, .DOP, .ISC, .KIL, .LAS, .LAX, .RLA, .RRA, .SLO, .SRE, .SXA,
+            .SYA, .TOP, .XAA, .XAS => true,
+            .NOP => |instruction| switch (instruction.code) {
+                0x1A, 0x3A, 0x5A, 0x7A, 0xDA, 0xFA =>  true,
+                else => false
+            },
+            .SBC => |instruction| instruction.code == 0xEB,
+            // zig fmt: on
+            else => false,
+        };
     }
 };
 
@@ -756,7 +841,7 @@ pub const OP_CODES = [_]OpCode{
         .LDY = .{ .code = 0xB4, .size = 2, .cycles = 4, .addressing_mode = AdressingMode.ZeroPageX } 
     },
     .{
-        .LDY = .{ .code = 0xAC, .size = 3, .cycles = 4, .addressing_mode = AdressingMode.Absolute } 
+        .LDY = .{ .code = 0xAC, .size = 3, .cycles = 4, .addressing_mode = AdressingMode.Absolute }
     },
     .{
         .LDY = .{ .code = 0xBC, .size = 3, .cycles = 4, // (+1 if page crossed)
@@ -869,6 +954,333 @@ pub const OP_CODES = [_]OpCode{
 
     .{
         .NOP = .{ .code = 0xEA, .size = 1, .cycles = 2, .addressing_mode = AdressingMode.Implicit }
+    },
+
+
+    // UNOFFICIAL OPCODES:
+    .{
+        .ANC = .{ .code = 0x0B, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .ANC = .{ .code = 0x2B, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .SAX = .{ .code = 0x87, .size = 2, .cycles = 3, .addressing_mode = AdressingMode.ZeroPage }
+    },
+    .{
+        .SAX = .{ .code = 0x97, .size = 2, .cycles = 4, .addressing_mode = AdressingMode.ZeroPageY }
+    },
+    .{
+        .SAX = .{ .code = 0x83, .size = 2, .cycles = 6, .addressing_mode = AdressingMode.IndirectX }
+    },
+    .{
+        .SAX = .{ .code = 0x8F, .size = 3, .cycles = 4, .addressing_mode = AdressingMode.Absolute }
+    },
+    .{
+        .ARR = .{ .code = 0x6B, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .ALR = .{ .code = 0x4B, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .ATX = .{ .code = 0xAB, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .AXA = .{ .code = 0x9F, .size = 3, .cycles = 5, .addressing_mode = AdressingMode.AbsoluteY }
+    },
+    .{
+        .AXA = .{ .code = 0x93, .size = 2, .cycles = 6, .addressing_mode = AdressingMode.IndirectY }
+    },
+    .{
+        .AXS = .{ .code = 0xCB, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .DCP = .{ .code = 0xC7, .size = 2, .cycles = 5, .addressing_mode = AdressingMode.ZeroPage }
+    },
+    .{
+        .DCP = .{ .code = 0xD7, .size = 2, .cycles = 6, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .DCP = .{ .code = 0xCF, .size = 3, .cycles = 6, .addressing_mode = AdressingMode.Absolute }
+    },
+    .{
+        .DCP = .{ .code = 0xDF, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .DCP = .{ .code = 0xDB, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteY }
+    },
+    .{
+        .DCP = .{ .code = 0xC3, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectX }
+    },
+    .{
+        .DCP = .{ .code = 0xD3, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectY }
+    },
+    .{
+        .DOP = .{ .code = 0x04, .size = 2, .cycles = 3, .addressing_mode = AdressingMode.ZeroPage }
+    },
+    .{
+        .DOP = .{ .code = 0x14, .size = 2, .cycles = 4, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .DOP = .{ .code = 0x34, .size = 2, .cycles = 4, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .DOP = .{ .code = 0x44, .size = 2, .cycles = 3, .addressing_mode = AdressingMode.ZeroPage }
+    },
+    .{
+        .DOP = .{ .code = 0x54, .size = 2, .cycles = 4, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .DOP = .{ .code = 0x64, .size = 2, .cycles = 3, .addressing_mode = AdressingMode.ZeroPage }
+    },
+    .{
+        .DOP = .{ .code = 0x74, .size = 2, .cycles = 4, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .DOP = .{ .code = 0x80, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .DOP = .{ .code = 0x82, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .DOP = .{ .code = 0x89, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .DOP = .{ .code = 0xC2, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .DOP = .{ .code = 0xD4, .size = 2, .cycles = 4, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .DOP = .{ .code = 0xE2, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .DOP = .{ .code = 0xF4, .size = 2, .cycles = 4, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .ISC = .{ .code = 0xE7, .size = 2, .cycles = 5, .addressing_mode = AdressingMode.ZeroPage }
+    },
+    .{
+        .ISC = .{ .code = 0xF7, .size = 2, .cycles = 6, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .ISC = .{ .code = 0xEF, .size = 3, .cycles = 6, .addressing_mode = AdressingMode.Absolute }
+    },
+    .{
+        .ISC = .{ .code = 0xFF, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .ISC = .{ .code = 0xFB, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteY }
+    },
+    .{
+        .ISC = .{ .code = 0xE3, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectX }
+    },
+    .{
+        .ISC = .{ .code = 0xF3, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectY }
+    },
+    .{
+        .KIL = .{ .code = 0x02, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .KIL = .{ .code = 0x12, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .KIL = .{ .code = 0x22, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .KIL = .{ .code = 0x32, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .KIL = .{ .code = 0x42, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .KIL = .{ .code = 0x52, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .KIL = .{ .code = 0x62, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .KIL = .{ .code = 0x72, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .KIL = .{ .code = 0x92, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .KIL = .{ .code = 0xB2, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .KIL = .{ .code = 0xD2, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .KIL = .{ .code = 0xF2, .size = 1, .cycles = 0, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .LAS = .{ .code = 0xBB, .size = 3, .cycles = 4, // (+1 if page crossed)
+            .addressing_mode = AdressingMode.AbsoluteY }
+    },
+    .{
+        .LAX = .{ .code = 0xA7, .size = 2, .cycles = 3, .addressing_mode = AdressingMode.ZeroPage }
+    },
+    .{
+        .LAX = .{ .code = 0xB7, .size = 2, .cycles = 4, .addressing_mode = AdressingMode.ZeroPageY }
+    },
+    .{
+        .LAX = .{ .code = 0xAF, .size = 3, .cycles = 4, .addressing_mode = AdressingMode.Absolute }
+    },
+    .{
+        .LAX = .{ .code = 0xBF, .size = 3, .cycles = 4, // (+1 if page crossed)
+            .addressing_mode = AdressingMode.AbsoluteY }
+    },
+    .{
+        .LAX = .{ .code = 0xA3, .size = 2, .cycles = 6, .addressing_mode = AdressingMode.IndirectX }
+    },
+    .{
+        .LAX = .{ .code = 0xB3, .size = 2, .cycles = 5, // (+1 if page crossed)
+            .addressing_mode = AdressingMode.IndirectY }
+    },
+    .{
+        .NOP = .{ .code = 0x1A, .size = 1, .cycles = 2, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .NOP = .{ .code = 0x3A, .size = 1, .cycles = 2, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .NOP = .{ .code = 0x5A, .size = 1, .cycles = 2, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .NOP = .{ .code = 0x7A, .size = 1, .cycles = 2, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .NOP = .{ .code = 0xDA, .size = 1, .cycles = 2, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .NOP = .{ .code = 0xFA, .size = 1, .cycles = 2, .addressing_mode = AdressingMode.Implicit }
+    },
+    .{
+        .RLA = .{ .code = 0x27, .size = 2, .cycles = 5, .addressing_mode = AdressingMode.ZeroPage }
+    },
+    .{
+        .RLA = .{ .code = 0x37, .size = 2, .cycles = 6, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .RLA = .{ .code = 0x2F, .size = 3, .cycles = 6, .addressing_mode = AdressingMode.Absolute }
+    },
+    .{
+        .RLA = .{ .code = 0x3F, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .RLA = .{ .code = 0x3B, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteY }
+    },
+    .{
+        .RLA = .{ .code = 0x23, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectX }
+    },
+    .{
+        .RLA = .{ .code = 0x33, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectY }
+    },
+    .{
+        .RRA = .{ .code = 0x67, .size = 2, .cycles = 5, .addressing_mode = AdressingMode.ZeroPage }
+    },
+    .{
+        .RRA = .{ .code = 0x77, .size = 2, .cycles = 6, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .RRA = .{ .code = 0x6F, .size = 3, .cycles = 6, .addressing_mode = AdressingMode.Absolute }
+    },
+    .{
+        .RRA = .{ .code = 0x7F, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .RRA = .{ .code = 0x7B, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteY }
+    },
+    .{
+        .RRA = .{ .code = 0x63, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectX }
+    },
+    .{
+        .RRA = .{ .code = 0x73, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectY }
+    },
+    .{
+        .SBC = .{ .code = 0xEB, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .SLO = .{ .code = 0x07, .size = 2, .cycles = 5, .addressing_mode = AdressingMode.ZeroPage }
+    },
+    .{
+        .SLO = .{ .code = 0x17, .size = 2, .cycles = 6, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .SLO = .{ .code = 0x0F, .size = 3, .cycles = 6, .addressing_mode = AdressingMode.Absolute }
+    },
+    .{
+        .SLO = .{ .code = 0x1F, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .SLO = .{ .code = 0x1B, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteY }
+    },
+    .{
+        .SLO = .{ .code = 0x03, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectX }
+    },
+    .{
+        .SLO = .{ .code = 0x13, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectY }
+    },
+    .{
+        .SRE = .{ .code = 0x47, .size = 2, .cycles = 5, .addressing_mode = AdressingMode.ZeroPage }
+    },
+    .{
+        .SRE = .{ .code = 0x57, .size = 2, .cycles = 6, .addressing_mode = AdressingMode.ZeroPageX }
+    },
+    .{
+        .SRE = .{ .code = 0x4F, .size = 3, .cycles = 6, .addressing_mode = AdressingMode.Absolute }
+    },
+    .{
+        .SRE = .{ .code = 0x5F, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .SRE = .{ .code = 0x5B, .size = 3, .cycles = 7, .addressing_mode = AdressingMode.AbsoluteY }
+    },
+    .{
+        .SRE = .{ .code = 0x43, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectX }
+    },
+    .{
+        .SRE = .{ .code = 0x53, .size = 2, .cycles = 8, .addressing_mode = AdressingMode.IndirectY }
+    },
+    .{
+        .SXA = .{ .code = 0x9E, .size = 3, .cycles = 5, .addressing_mode = AdressingMode.AbsoluteY }
+    },
+    .{
+        .SYA = .{ .code = 0x9C, .size = 3, .cycles = 5, .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .TOP = .{ .code = 0x0C, .size = 3, .cycles = 4, .addressing_mode = AdressingMode.Absolute }
+    },
+    .{
+        .TOP = .{ .code = 0x1C, .size = 3, .cycles = 4, // +1 if page crossed
+            .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .TOP = .{ .code = 0x3C, .size = 3, .cycles = 4, // +1 if page crossed
+            .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .TOP = .{ .code = 0x5C, .size = 3, .cycles = 4, // +1 if page crossed
+            .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .TOP = .{ .code = 0x7C, .size = 3, .cycles = 4, // +1 if page crossed
+            .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .TOP = .{ .code = 0xDC, .size = 3, .cycles = 4, // +1 if page crossed
+            .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .TOP = .{ .code = 0xFC, .size = 3, .cycles = 4, // +1 if page crossed
+            .addressing_mode = AdressingMode.AbsoluteX }
+    },
+    .{
+        .XAA = .{ .code = 0x8B, .size = 2, .cycles = 2, .addressing_mode = AdressingMode.Immediate }
+    },
+    .{
+        .XAS = .{ .code = 0x9B, .size = 3, .cycles = 5, .addressing_mode = AdressingMode.AbsoluteY }
     },
 };
 // zig fmt: on

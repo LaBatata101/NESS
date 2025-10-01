@@ -80,6 +80,7 @@ pub const CPU = struct {
 
     const Self = @This();
 
+    const STACK_TOP: u8 = 0xFD;
     const STACK_START: u16 = 0x0100;
     const STACK_END: u16 = 0x01FF;
 
@@ -89,7 +90,7 @@ pub const CPU = struct {
         initial_status.break2 = true;
 
         return .{
-            .sp = 0xFF,
+            .sp = STACK_TOP,
             .pc = 0x8000,
             .register_a = 0,
             .register_x = 0,
@@ -116,7 +117,7 @@ pub const CPU = struct {
         self.bus.mem_write(addr, data);
     }
 
-    fn mem_read_u16(self: *Self, addr: u16) u16 {
+    pub fn mem_read_u16(self: Self, addr: u16) u16 {
         return self.bus.mem_read_u16(addr);
     }
 
@@ -137,7 +138,7 @@ pub const CPU = struct {
         self.register_a = 0;
         self.register_x = 0;
         self.register_y = 0;
-        self.sp = 0xFF;
+        self.sp = STACK_TOP;
 
         self.status = .{};
         self.status.interrupt_disable = true;
@@ -180,7 +181,7 @@ pub const CPU = struct {
     fn stack_push_u16(self: *Self, data: u16) void {
         const hi: u8 = @truncate(data >> 8);
         const lo: u8 = @truncate(data);
-        // std.debug.print("data: 0x{X} | hi: 0x{X} | lo: 0x{X}\n\n", .{ data, hi, lo });
+
         self.stack_push(hi);
         self.stack_push(lo);
     }
@@ -215,7 +216,7 @@ pub const CPU = struct {
                     const lo = self.mem_read(ptr_addr);
                     const hi = self.mem_read(ptr_addr & 0xFF00);
 
-                    return @as(u16, hi) << 8 | @as(u16, lo);
+                    return @as(u16, hi) << 8 | lo;
                 } else {
                     return self.mem_read_u16(ptr_addr);
                 }
@@ -226,16 +227,15 @@ pub const CPU = struct {
                 const lo = self.mem_read(ptr);
                 const hi = self.mem_read(ptr +% 1);
 
-                return @as(u16, hi) << 8 | @as(u16, lo);
+                return @as(u16, hi) << 8 | lo;
             },
             AdressingMode.IndirectY => {
                 const base = self.mem_read(self.pc);
                 const lo = self.mem_read(base);
                 const hi = self.mem_read(base +% 1);
-                const deref_base = @as(u16, hi) << 8 | @as(u16, lo);
-                const deref = deref_base +% self.register_y;
+                const ptr_addr_base = @as(u16, hi) << 8 | lo;
 
-                return deref;
+                return ptr_addr_base +% self.register_y;
             },
             AdressingMode.Implicit => unreachable,
         };
@@ -257,15 +257,183 @@ pub const CPU = struct {
         self.update_zero_and_negative_flags(result);
     }
 
+    fn cmp(self: *Self, opcode: opcodes.OpCode) void {
+        self.compare(opcode.addressing_mode(), self.register_a);
+    }
+
+    fn dec(self: *Self, opcode: opcodes.OpCode) void {
+        const addr = self.operand_address(opcode.addressing_mode());
+        const data = self.mem_read(addr);
+        const result = data -% 1;
+
+        self.mem_write(addr, result);
+        self.update_zero_and_negative_flags(result);
+    }
+
     fn adc(self: *Self, value: u8) void {
         const sum: u16 = @as(u16, self.register_a) + @as(u16, value) + @as(u16, @intFromBool(self.status.carry_flag));
-        self.status.carry_flag = (sum > 0xFF);
+        self.status.carry_flag = sum > 0xFF;
 
         const result: u8 = @truncate(sum);
 
         self.status.overflow_flag = (value ^ result) & (result ^ self.register_a) & 0x80 != 0;
 
         self.register_a = result;
+        self.update_zero_and_negative_flags(self.register_a);
+    }
+
+    fn sbc(self: *Self, value: u8) void {
+        self.adc(@as(u8, @bitCast(-%@as(i8, @bitCast(value)) -% 1)));
+    }
+
+    fn @"and"(self: *Self, opcode: opcodes.OpCode, register: u8) u8 {
+        const addr = self.operand_address(opcode.addressing_mode());
+        const data = self.mem_read(addr);
+
+        const result = register & data;
+        self.update_zero_and_negative_flags(result);
+
+        return result;
+    }
+
+    fn lsr_value(self: *Self, value: u8) u8 {
+        self.status.carry_flag = value & 1 != 0;
+        const result = value >> 1;
+        self.update_zero_and_negative_flags(result);
+
+        return result;
+    }
+
+    fn lsr(self: *Self, opcode: opcodes.OpCode) void {
+        switch (opcode.addressing_mode()) {
+            .Implicit => {
+                self.register_a = self.lsr_value(self.register_a);
+            },
+            else => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                const value = self.mem_read(addr);
+                self.mem_write(addr, self.lsr_value(value));
+            },
+        }
+    }
+
+    fn eor(self: *Self, opcode: opcodes.OpCode) void {
+        const data = self.mem_read(self.operand_address(opcode.addressing_mode()));
+        self.register_a ^= data;
+        self.update_zero_and_negative_flags(self.register_a);
+    }
+
+    fn asl(self: *Self, opcode: opcodes.OpCode) void {
+        switch (opcode.addressing_mode()) {
+            .Implicit => {
+                const result = @mulWithOverflow(self.register_a, 2);
+
+                self.register_a = result[0];
+                self.status.carry_flag = result[1] == 1;
+                self.update_zero_and_negative_flags(self.register_a);
+            },
+            else => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                const value = self.mem_read(addr);
+
+                const result = @mulWithOverflow(value, 2);
+
+                self.mem_write(addr, result[0]);
+                self.status.carry_flag = result[1] == 1;
+                self.update_zero_and_negative_flags(value);
+            },
+        }
+    }
+
+    fn rol(self: *Self, opcode: opcodes.OpCode) void {
+        switch (opcode.addressing_mode()) {
+            .Implicit => {
+                const is_bit7_set = self.register_a & (1 << 7) != 0;
+
+                self.register_a <<= 1;
+                // set bit 0 to the value of carry flag
+                self.register_a = self.register_a | @intFromBool(self.status.carry_flag);
+                self.status.carry_flag = is_bit7_set;
+
+                self.update_zero_and_negative_flags(self.register_a);
+            },
+            else => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                var value = self.mem_read(addr);
+                const is_bit7_set = value & (1 << 7) != 0;
+
+                value <<= 1;
+                // set bit 0 to the value of carry flag
+                value = value | @intFromBool(self.status.carry_flag);
+                self.mem_write(addr, value);
+                self.status.carry_flag = is_bit7_set;
+
+                self.update_zero_and_negative_flags(value);
+            },
+        }
+    }
+
+    fn ror(self: *Self, opcode: opcodes.OpCode) void {
+        switch (opcode.addressing_mode()) {
+            .Implicit => {
+                const is_bit0_set = self.register_a & 1 != 0;
+
+                self.register_a >>= 1;
+                // set bit 7 to the value of carry flag
+                self.register_a = (self.register_a & ~@as(u8, 0x80)) | @as(u8, @intFromBool(self.status.carry_flag)) << 7;
+                self.status.carry_flag = is_bit0_set;
+
+                self.update_zero_and_negative_flags(self.register_a);
+            },
+            else => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                var value = self.mem_read(addr);
+                const is_bit0_set = value & 1 != 0;
+
+                value >>= 1;
+                // set bit 7 to the value of carry flag
+                value = (value & ~@as(u8, 0x80)) | @as(u8, @intFromBool(self.status.carry_flag)) << 7;
+                self.mem_write(addr, value);
+                self.status.carry_flag = is_bit0_set;
+
+                self.update_zero_and_negative_flags(value);
+            },
+        }
+    }
+
+    fn ora(self: *Self, opcode: opcodes.OpCode) void {
+        const value = self.mem_read(self.operand_address(opcode.addressing_mode()));
+        self.register_a |= value;
+        self.update_zero_and_negative_flags(self.register_a);
+    }
+
+    fn inc(self: *Self, opcode: opcodes.OpCode) u8 {
+        const addr = self.operand_address(opcode.addressing_mode());
+        const value = self.mem_read(addr);
+        const result = value +% 1;
+
+        self.mem_write(addr, result);
+        self.update_zero_and_negative_flags(result);
+
+        return result;
+    }
+
+    fn lda(self: *Self, opcode: opcodes.OpCode) void {
+        const addr = self.operand_address(opcode.addressing_mode());
+        const value = self.mem_read(addr);
+        self.register_a = value;
+        self.update_zero_and_negative_flags(self.register_a);
+    }
+
+    fn ldx(self: *Self, opcode: opcodes.OpCode) void {
+        const addr = self.operand_address(opcode.addressing_mode());
+        const value = self.mem_read(addr);
+        self.register_x = value;
+        self.update_zero_and_negative_flags(self.register_x);
+    }
+
+    fn txa(self: *Self) void {
+        self.register_a = self.register_x;
         self.update_zero_and_negative_flags(self.register_a);
     }
 
@@ -279,327 +447,311 @@ pub const CPU = struct {
     }
 
     pub fn run_with(self: *Self, callback: anytype) void {
-        while (true) {
-            const code = self.mem_read(self.pc);
-            const opcode = opcodes.get_opcode(code);
-            self.pc += 1;
-            const pc_state = self.pc;
-
-            switch (opcode) {
-                .ADC => {
-                    // NOTE: ignoring decimal mode
-                    const addr = self.operand_address(opcode.addressing_mode());
-                    const data = self.mem_read(addr);
-                    self.adc(data);
-                },
-                .SBC => {
-                    // NOTE: ignoring decimal mode
-                    const addr = self.operand_address(opcode.addressing_mode());
-                    const data = self.mem_read(addr);
-
-                    self.adc(@as(u8, @bitCast(-%@as(i8, @bitCast(data)) -% 1)));
-                },
-                .AND => {
-                    const addr = self.operand_address(opcode.addressing_mode());
-                    const data = self.mem_read(addr);
-
-                    self.register_a &= data;
-                    self.update_zero_and_negative_flags(self.register_a);
-                },
-                .EOR => {
-                    const data = self.mem_read(self.operand_address(opcode.addressing_mode()));
-                    self.register_a ^= data;
-                    self.update_zero_and_negative_flags(self.register_a);
-                },
-                .ASL => switch (opcode.addressing_mode()) {
-                    .Implicit => {
-                        const result = @mulWithOverflow(self.register_a, 2);
-
-                        self.register_a = result[0];
-                        self.status.carry_flag = result[1] == 1;
-                        self.update_zero_and_negative_flags(self.register_a);
-                    },
-                    else => {
-                        const addr = self.operand_address(opcode.addressing_mode());
-                        const value = self.mem_read(addr);
-
-                        const result = @mulWithOverflow(value, 2);
-
-                        self.mem_write(addr, result[0]);
-                        self.status.carry_flag = result[1] == 1;
-                        self.update_zero_and_negative_flags(value);
-                    },
-                },
-                .LSR => switch (opcode.addressing_mode()) {
-                    .Implicit => {
-                        self.status.carry_flag = self.register_a & 1 == 1;
-                        self.register_a >>= 1;
-                        self.update_zero_and_negative_flags(self.register_a);
-                    },
-                    else => {
-                        const addr = self.operand_address(opcode.addressing_mode());
-                        var value = self.mem_read(addr);
-                        self.status.carry_flag = value & 1 == 1;
-                        value >>= 1;
-                        self.mem_write(addr, value);
-                        self.update_zero_and_negative_flags(value);
-                    },
-                },
-                .ROL => switch (opcode.addressing_mode()) {
-                    .Implicit => {
-                        const is_bit7_set = self.register_a & (1 << 7) != 0;
-
-                        self.register_a <<= 1;
-                        // set bit 0 to the value of carry flag
-                        self.register_a = self.register_a | @intFromBool(self.status.carry_flag);
-                        self.status.carry_flag = is_bit7_set;
-
-                        self.update_zero_and_negative_flags(self.register_a);
-                    },
-                    else => {
-                        const addr = self.operand_address(opcode.addressing_mode());
-                        var value = self.mem_read(addr);
-                        const is_bit7_set = value & (1 << 7) != 0;
-
-                        value <<= 1;
-                        // set bit 0 to the value of carry flag
-                        value = value | @intFromBool(self.status.carry_flag);
-                        self.mem_write(addr, value);
-                        self.status.carry_flag = is_bit7_set;
-
-                        self.update_zero_and_negative_flags(value);
-                    },
-                },
-                .ROR => switch (opcode.addressing_mode()) {
-                    .Implicit => {
-                        const is_bit0_set = self.register_a & 1 != 0;
-
-                        self.register_a >>= 1;
-                        // set bit 7 to the value of carry flag
-                        self.register_a = (self.register_a & ~@as(u8, 0x80)) | @as(u8, @intFromBool(self.status.carry_flag)) << 7;
-                        self.status.carry_flag = is_bit0_set;
-
-                        self.update_zero_and_negative_flags(self.register_a);
-                    },
-                    else => {
-                        const addr = self.operand_address(opcode.addressing_mode());
-                        var value = self.mem_read(addr);
-                        const is_bit0_set = value & 1 != 0;
-
-                        value >>= 1;
-                        // set bit 7 to the value of carry flag
-                        value = (value & ~@as(u8, 0x80)) | @as(u8, @intFromBool(self.status.carry_flag)) << 7;
-                        self.mem_write(addr, value);
-                        self.status.carry_flag = is_bit0_set;
-
-                        self.update_zero_and_negative_flags(value);
-                    },
-                },
-                .ORA => {
-                    const value = self.mem_read(self.operand_address(opcode.addressing_mode()));
-                    self.register_a |= value;
-                    self.update_zero_and_negative_flags(self.register_a);
-                },
-                .LDA => {
-                    const addr = self.operand_address(opcode.addressing_mode());
-                    const value = self.mem_read(addr);
-                    self.register_a = value;
-                    self.update_zero_and_negative_flags(self.register_a);
-                },
-                .LDX => {
-                    const addr = self.operand_address(opcode.addressing_mode());
-                    const value = self.mem_read(addr);
-                    self.register_x = value;
-                    self.update_zero_and_negative_flags(self.register_x);
-                },
-                .LDY => {
-                    const addr = self.operand_address(opcode.addressing_mode());
-                    const value = self.mem_read(addr);
-                    self.register_y = value;
-                    self.update_zero_and_negative_flags(self.register_y);
-                },
-                .TAX => {
-                    self.register_x = self.register_a;
-                    self.update_zero_and_negative_flags(self.register_x);
-                },
-                .TAY => {
-                    self.register_y = self.register_a;
-                    self.update_zero_and_negative_flags(self.register_y);
-                },
-                .TXA => {
-                    self.register_a = self.register_x;
-                    self.update_zero_and_negative_flags(self.register_a);
-                },
-                .TYA => {
-                    self.register_a = self.register_y;
-                    self.update_zero_and_negative_flags(self.register_a);
-                },
-                .TSX => {
-                    self.register_x = self.sp;
-                    self.update_zero_and_negative_flags(self.register_x);
-                },
-                .TXS => {
-                    self.sp = self.register_x;
-                },
-                .INX => {
-                    self.register_x +%= 1;
-                    self.update_zero_and_negative_flags(self.register_x);
-                },
-                .INY => {
-                    self.register_y +%= 1;
-                    self.update_zero_and_negative_flags(self.register_y);
-                },
-                .INC => {
-                    const addr = self.operand_address(opcode.addressing_mode());
-                    const value = self.mem_read(addr);
-                    const result = value +% 1;
-
-                    self.mem_write(addr, result);
-                    self.update_zero_and_negative_flags(result);
-                },
-                .STA => {
-                    const addr = self.operand_address(opcode.addressing_mode());
-                    self.mem_write(addr, self.register_a);
-                },
-                .STX => {
-                    const addr = self.operand_address(opcode.addressing_mode());
-                    self.mem_write(addr, self.register_x);
-                },
-                .STY => {
-                    const addr = self.operand_address(opcode.addressing_mode());
-                    self.mem_write(addr, self.register_y);
-                },
-                .CMP => {
-                    self.compare(opcode.addressing_mode(), self.register_a);
-                },
-                .CPX => {
-                    self.compare(opcode.addressing_mode(), self.register_x);
-                },
-                .CPY => {
-                    self.compare(opcode.addressing_mode(), self.register_y);
-                },
-                .BNE => {
-                    self.branch(opcode.addressing_mode(), !self.status.zero_flag);
-                },
-                .BEQ => {
-                    self.branch(opcode.addressing_mode(), self.status.zero_flag);
-                },
-                .BCC => {
-                    self.branch(opcode.addressing_mode(), !self.status.carry_flag);
-                },
-                .BCS => {
-                    self.branch(opcode.addressing_mode(), self.status.carry_flag);
-                },
-                .BPL => {
-                    self.branch(opcode.addressing_mode(), !self.status.negative_flag);
-                },
-                .BMI => {
-                    self.branch(opcode.addressing_mode(), self.status.negative_flag);
-                },
-                .BVC => {
-                    self.branch(opcode.addressing_mode(), !self.status.overflow_flag);
-                },
-                .BVS => {
-                    self.branch(opcode.addressing_mode(), self.status.overflow_flag);
-                },
-                .BIT => {
-                    const data = self.mem_read(self.operand_address(opcode.addressing_mode()));
-
-                    self.status.zero_flag = self.register_a & data == 0;
-                    self.status.overflow_flag = data & 0b0100_0000 != 0;
-                    self.status.negative_flag = data & 0b1000_0000 != 0;
-                },
-                .CLC => {
-                    self.status.carry_flag = false;
-                },
-                .CLD => {
-                    self.status.decimal_mode = false;
-                },
-                .SED => {
-                    self.status.decimal_mode = true;
-                },
-                .CLI => {
-                    self.status.interrupt_disable = false;
-                },
-                .CLV => {
-                    self.status.overflow_flag = false;
-                },
-                .SEI => {
-                    self.status.interrupt_disable = true;
-                },
-                .SEC => {
-                    self.status.carry_flag = true;
-                },
-                .DEC => {
-                    const addr = self.operand_address(opcode.addressing_mode());
-                    const data = self.mem_read(addr);
-                    const result = data -% 1;
-
-                    self.mem_write(addr, result);
-                    self.update_zero_and_negative_flags(result);
-                },
-                .JMP => {
-                    const jmp_addr = self.operand_address(opcode.addressing_mode());
-                    self.pc = jmp_addr;
-                },
-                .JSR => {
-                    self.stack_push_u16(self.pc + 2 - 1);
-                    const jmp_addr = self.operand_address(opcode.addressing_mode());
-                    self.pc = jmp_addr;
-                },
-                .RTS => {
-                    self.pc = self.stack_pop_u16() + 1;
-                },
-                .RTI => {
-                    self.status = @bitCast(self.stack_pop());
-                    self.status.break_command = false;
-                    self.status.break2 = true;
-
-                    self.pc = self.stack_pop_u16();
-                },
-                .DEX => {
-                    self.register_x -%= 1;
-                    self.update_zero_and_negative_flags(self.register_x);
-                },
-                .DEY => {
-                    self.register_y -%= 1;
-                    self.update_zero_and_negative_flags(self.register_y);
-                },
-                .PHA => {
-                    self.stack_push(self.register_a);
-                },
-                .PLA => {
-                    self.register_a = self.stack_pop();
-                    self.update_zero_and_negative_flags(self.register_a);
-                },
-                .PHP => {
-                    var copy_status = self.status;
-                    copy_status.break_command = true;
-                    copy_status.break2 = true;
-                    self.stack_push(@bitCast(copy_status));
-                },
-                .PLP => {
-                    self.status = @bitCast(self.stack_pop());
-                    self.status.break_command = false;
-                    self.status.break2 = true;
-                },
-                .NOP => {},
-                .BRK => {
-                    // TODO: properly implement this
-                    self.status.break_command = true;
-                    // self.stack_push_u16(self.pc);
-                    // self.stack_push(@bitCast(self.status));
-                    // self.pc = self.mem_read_u16(0xFFFE);
-                    break;
-                },
-            }
-
-            if (self.pc == pc_state) {
-                self.pc += opcode.size() - 1;
-            }
-
+        var continue_exec = true;
+        while (continue_exec) {
             callback.callback(self);
+            continue_exec = self.tick();
         }
+    }
+
+    pub fn tick(self: *Self) bool {
+        const code = self.mem_read(self.pc);
+        const opcode = opcodes.get_opcode(code);
+        self.pc += 1;
+        const pc_state = self.pc;
+
+        switch (opcode) {
+            .ADC => {
+                // NOTE: ignoring decimal mode
+                const addr = self.operand_address(opcode.addressing_mode());
+                const data = self.mem_read(addr);
+                self.adc(data);
+            },
+            .SBC => {
+                // NOTE: ignoring decimal mode
+                const addr = self.operand_address(opcode.addressing_mode());
+                const data = self.mem_read(addr);
+                self.sbc(data);
+            },
+            .AND => {
+                self.register_a = self.@"and"(opcode, self.register_a);
+            },
+            .EOR => self.eor(opcode),
+            .ASL => self.asl(opcode),
+            .LSR => self.lsr(opcode),
+            .ROL => self.rol(opcode),
+            .ROR => self.ror(opcode),
+            .ORA => self.ora(opcode),
+            .LDA => self.lda(opcode),
+            .LDX => self.ldx(opcode),
+            .LDY => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                const value = self.mem_read(addr);
+                self.register_y = value;
+                self.update_zero_and_negative_flags(self.register_y);
+            },
+            .TAX => {
+                self.register_x = self.register_a;
+                self.update_zero_and_negative_flags(self.register_x);
+            },
+            .TAY => {
+                self.register_y = self.register_a;
+                self.update_zero_and_negative_flags(self.register_y);
+            },
+            .TXA => self.txa(),
+            .TYA => {
+                self.register_a = self.register_y;
+                self.update_zero_and_negative_flags(self.register_a);
+            },
+            .TSX => {
+                self.register_x = self.sp;
+                self.update_zero_and_negative_flags(self.register_x);
+            },
+            .TXS => {
+                self.sp = self.register_x;
+            },
+            .INX => {
+                self.register_x +%= 1;
+                self.update_zero_and_negative_flags(self.register_x);
+            },
+            .INY => {
+                self.register_y +%= 1;
+                self.update_zero_and_negative_flags(self.register_y);
+            },
+            .INC => {
+                _ = self.inc(opcode);
+            },
+            .STA => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                self.mem_write(addr, self.register_a);
+            },
+            .STX => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                self.mem_write(addr, self.register_x);
+            },
+            .STY => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                self.mem_write(addr, self.register_y);
+            },
+            .CMP => self.cmp(opcode),
+            .CPX => {
+                self.compare(opcode.addressing_mode(), self.register_x);
+            },
+            .CPY => {
+                self.compare(opcode.addressing_mode(), self.register_y);
+            },
+            .BNE => {
+                self.branch(opcode.addressing_mode(), !self.status.zero_flag);
+            },
+            .BEQ => {
+                self.branch(opcode.addressing_mode(), self.status.zero_flag);
+            },
+            .BCC => {
+                self.branch(opcode.addressing_mode(), !self.status.carry_flag);
+            },
+            .BCS => {
+                self.branch(opcode.addressing_mode(), self.status.carry_flag);
+            },
+            .BPL => {
+                self.branch(opcode.addressing_mode(), !self.status.negative_flag);
+            },
+            .BMI => {
+                self.branch(opcode.addressing_mode(), self.status.negative_flag);
+            },
+            .BVC => {
+                self.branch(opcode.addressing_mode(), !self.status.overflow_flag);
+            },
+            .BVS => {
+                self.branch(opcode.addressing_mode(), self.status.overflow_flag);
+            },
+            .BIT => {
+                const data = self.mem_read(self.operand_address(opcode.addressing_mode()));
+
+                self.status.zero_flag = self.register_a & data == 0;
+                self.status.overflow_flag = data & 0b0100_0000 != 0;
+                self.status.negative_flag = data & 0b1000_0000 != 0;
+            },
+            .CLC => {
+                self.status.carry_flag = false;
+            },
+            .CLD => {
+                self.status.decimal_mode = false;
+            },
+            .SED => {
+                self.status.decimal_mode = true;
+            },
+            .CLI => {
+                self.status.interrupt_disable = false;
+            },
+            .CLV => {
+                self.status.overflow_flag = false;
+            },
+            .SEI => {
+                self.status.interrupt_disable = true;
+            },
+            .SEC => {
+                self.status.carry_flag = true;
+            },
+            .DEC => self.dec(opcode),
+            .JMP => {
+                const jmp_addr = self.operand_address(opcode.addressing_mode());
+                self.pc = jmp_addr;
+            },
+            .JSR => {
+                self.stack_push_u16(self.pc + 2 - 1);
+                const jmp_addr = self.operand_address(opcode.addressing_mode());
+                self.pc = jmp_addr;
+            },
+            .RTS => {
+                self.pc = self.stack_pop_u16() + 1;
+            },
+            .RTI => {
+                self.status = @bitCast(self.stack_pop());
+                self.status.break_command = false;
+                self.status.break2 = true;
+
+                self.pc = self.stack_pop_u16();
+            },
+            .DEX => {
+                self.register_x -%= 1;
+                self.update_zero_and_negative_flags(self.register_x);
+            },
+            .DEY => {
+                self.register_y -%= 1;
+                self.update_zero_and_negative_flags(self.register_y);
+            },
+            .PHA => {
+                self.stack_push(self.register_a);
+            },
+            .PLA => {
+                self.register_a = self.stack_pop();
+                self.update_zero_and_negative_flags(self.register_a);
+            },
+            .PHP => {
+                var copy_status = self.status;
+                copy_status.break_command = true;
+                copy_status.break2 = true;
+                self.stack_push(@bitCast(copy_status));
+            },
+            .PLP => {
+                self.status = @bitCast(self.stack_pop());
+                self.status.break_command = false;
+                self.status.break2 = true;
+            },
+            .BRK => {
+                // TODO: properly implement this
+                self.status.break_command = true;
+                // self.stack_push_u16(self.pc);
+                // self.stack_push(@bitCast(self.status));
+                // self.pc = self.mem_read_u16(0xFFFE);
+                return false;
+            },
+
+            // UNOFFICIAL OPCODES:
+            .ANC => {
+                self.register_a = self.@"and"(opcode, self.register_a);
+                self.status.carry_flag = self.register_a & 0x80 != 0;
+            },
+            .AXS => {
+                const value = self.mem_read(self.operand_address(opcode.addressing_mode()));
+                self.register_x &= self.register_a;
+                self.status.carry_flag = value > self.register_x;
+                self.register_x -%= value;
+
+                self.update_zero_and_negative_flags(self.register_x);
+            },
+            .ARR => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                const data = self.mem_read(addr);
+
+                self.register_a &= data;
+                self.register_a >>= 1;
+
+                self.status.carry_flag = self.register_a & 0b0100_0000 != 0;
+                self.status.overflow_flag = (self.register_a >> 5) & 1 ^ (self.register_a >> 6) & 1 != 0;
+                self.update_zero_and_negative_flags(self.register_a);
+            },
+            .ALR => {
+                self.register_a = self.lsr_value(self.@"and"(opcode, self.register_a));
+            },
+            .ATX => {
+                self.register_x = self.@"and"(opcode, self.register_a);
+            },
+            .AXA => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                const result = self.register_x & self.register_a & 7;
+                self.mem_write(addr, result);
+            },
+            .SAX => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                const result = self.register_a & self.register_x;
+                self.mem_write(addr, result);
+            },
+            .DCP => {
+                self.dec(opcode);
+                self.cmp(opcode);
+            },
+            .ISC => self.sbc(self.inc(opcode)),
+            .LAS => {
+                const value = self.mem_read(self.operand_address(opcode.addressing_mode()));
+                const result = value & self.sp;
+
+                self.register_a = result;
+                self.register_x = result;
+                self.sp = result;
+
+                self.update_zero_and_negative_flags(result);
+            },
+            .LAX => {
+                self.lda(opcode);
+                self.ldx(opcode);
+            },
+            .RLA => {
+                self.rol(opcode);
+                self.register_a = self.@"and"(opcode, self.register_a);
+            },
+            .RRA => {
+                self.ror(opcode);
+                self.adc(self.mem_read(self.operand_address(opcode.addressing_mode())));
+            },
+            .SLO => {
+                self.asl(opcode);
+                self.ora(opcode);
+            },
+            .SRE => {
+                self.lsr(opcode);
+                self.eor(opcode);
+            },
+            .SXA => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                const result = self.register_x & @as(u8, @truncate(addr >> 8)) + 1;
+                self.mem_write(addr, result);
+            },
+            .SYA => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                const result = self.register_y & @as(u8, @truncate(addr >> 8)) + 1;
+                self.mem_write(addr, result);
+            },
+            .XAA => {
+                self.txa();
+                self.register_a = self.@"and"(opcode, self.register_a);
+            },
+            .XAS => {
+                const addr = self.operand_address(opcode.addressing_mode());
+                self.sp = self.register_x & self.register_a;
+                const result = self.sp & @as(u8, @truncate(addr >> 8)) + 1;
+                self.mem_write(addr, result);
+            },
+            .NOP, .TOP, .DOP, .KIL => {
+                // Do nothing! Any arguments are ignored.
+            },
+        }
+
+        if (self.pc == pc_state) {
+            self.pc += opcode.size() - 1;
+        }
+
+        return true;
     }
 };
 
@@ -2265,4 +2417,495 @@ test "0x84: STY Store Y Register" {
     cpu.run();
 
     try std.testing.expectEqual(0x69, cpu.mem_read(0x00FF));
+}
+
+test "0x0B: ANC" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ANC         BRK
+        &[_]u8{ 0xA9, 0x80, 0x0B, 0x80, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
+    try std.testing.expectEqual(0x80, cpu.register_a);
+    try std.testing.expect(cpu.status.carry_flag);
+    try std.testing.expect(cpu.status.negative_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+}
+
+test "0x2B: ANC" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LDA         ANC         BRK
+        &[_]u8{ 0xA9, 0x00, 0x2B, 0x80, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+
+    try std.testing.expectEqual(0x00, cpu.register_a);
+    try std.testing.expect(!cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(cpu.status.zero_flag);
+}
+
+test "0xCB: AXS" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      AXS         BRK
+        &[_]u8{ 0xCB, 0x05, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_a = 1;
+    cpu.register_x = 3;
+    cpu.run();
+
+    try std.testing.expectEqual(252, cpu.register_x);
+    try std.testing.expect(cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+    try std.testing.expect(cpu.status.negative_flag);
+}
+
+test "0x6B: ARR" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      ARR         BRK
+        &[_]u8{ 0x6B, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_a = 0b1100_0000;
+    cpu.run();
+
+    try std.testing.expectEqual(96, cpu.register_a);
+    try std.testing.expect(cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.overflow_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+
+    cpu.reset();
+    cpu.pc = 0x8000;
+    cpu.register_a = 0b0000_0001;
+    cpu.run();
+
+    try std.testing.expectEqual(0, cpu.register_a);
+    try std.testing.expect(!cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.overflow_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(cpu.status.zero_flag);
+
+    cpu.reset();
+    cpu.pc = 0x8000;
+    cpu.register_a = 0b0100_0000;
+    cpu.run();
+
+    try std.testing.expectEqual(32, cpu.register_a);
+    try std.testing.expect(!cpu.status.carry_flag);
+    try std.testing.expect(cpu.status.overflow_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+
+    cpu.reset();
+    cpu.pc = 0x8000;
+    cpu.register_a = 0b1000_0000;
+    cpu.run();
+
+    try std.testing.expectEqual(64, cpu.register_a);
+    try std.testing.expect(cpu.status.carry_flag);
+    try std.testing.expect(cpu.status.overflow_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+}
+
+test "0x4B: ALR" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      ALR         BRK
+        &[_]u8{ 0x4B, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_a = 0b0000_0010;
+    cpu.run();
+
+    try std.testing.expectEqual(1, cpu.register_a);
+    try std.testing.expect(!cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+
+    cpu.reset();
+    cpu.pc = 0x8000;
+    cpu.register_a = 0b0000_0001;
+    cpu.run();
+
+    try std.testing.expectEqual(0, cpu.register_a);
+    try std.testing.expect(cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(cpu.status.zero_flag);
+}
+
+test "0xAB: ATX" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      ATX         BRK
+        &[_]u8{ 0xAB, 0x2, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_a = 2;
+    cpu.run();
+
+    try std.testing.expectEqual(2, cpu.register_x);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+
+    cpu.reset();
+    cpu.pc = 0x8000;
+    cpu.register_a = 1;
+    cpu.run();
+
+    try std.testing.expectEqual(0, cpu.register_x);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(cpu.status.zero_flag);
+}
+
+test "0x9F: AXA" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      AXA               BRK
+        &[_]u8{ 0x9F, 0x00, 0x10, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_a = 1;
+    cpu.register_x = 3;
+    cpu.register_y = 0x92;
+    cpu.run();
+
+    try std.testing.expectEqual(1, cpu.mem_read(0x1092));
+
+    cpu.reset();
+    cpu.pc = 0x8000;
+    cpu.register_a = 4;
+    cpu.register_x = 1;
+    cpu.register_y = 0x92;
+    cpu.run();
+
+    try std.testing.expectEqual(0, cpu.mem_read(0x1092));
+}
+
+test "0x87: SAX" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      SAX         BRK
+        &[_]u8{ 0x87, 0x05, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_x = 0x80;
+    cpu.register_a = 0x80;
+    cpu.run();
+
+    try std.testing.expectEqual(0x80, cpu.mem_read(0x05));
+}
+
+test "0xC7: DCP" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      DCP         BRK
+        &[_]u8{ 0xC7, 0x69, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.mem_write(0x69, 1);
+    cpu.run();
+
+    try std.testing.expectEqual(0, cpu.mem_read(0x69));
+    try std.testing.expect(cpu.status.carry_flag);
+
+    cpu.reset();
+    cpu.pc = 0x8000;
+    cpu.mem_write(0x69, 0);
+    cpu.run();
+
+    try std.testing.expectEqual(255, cpu.mem_read(0x69));
+    try std.testing.expect(!cpu.status.carry_flag);
+}
+
+test "0xE2: DOP" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      DOP         BRK
+        &[_]u8{ 0xE2, 0x69, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.run();
+}
+
+test "0xE7: ISC" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      ISC         BRK
+        &[_]u8{ 0xE7, 0x69, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_a = 1;
+    cpu.mem_write(0x69, 2);
+    cpu.run();
+
+    try std.testing.expectEqual(3, cpu.mem_read(0x69));
+    try std.testing.expect(cpu.status.negative_flag);
+    try std.testing.expect(!cpu.status.overflow_flag);
+    try std.testing.expect(!cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+
+    cpu.reset();
+    cpu.pc = 0x8000;
+    cpu.register_a = 5;
+    cpu.mem_write(0x69, 2);
+    cpu.run();
+
+    try std.testing.expect(cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(!cpu.status.overflow_flag);
+}
+
+test "0xBB: LAS" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LAS               BRK
+        &[_]u8{ 0xBB, 0x00, 0x10, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_y = 0x42;
+    cpu.mem_write(0x1042, 8);
+    cpu.run();
+
+    try std.testing.expectEqual(8, cpu.sp);
+    try std.testing.expectEqual(8, cpu.register_a);
+    try std.testing.expectEqual(8, cpu.register_x);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+}
+
+test "0xA7: LAX" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      LAX         BRK
+        &[_]u8{ 0xA7, 0xDF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.mem_write(0xDF, 42);
+    cpu.run();
+
+    try std.testing.expectEqual(42, cpu.register_a);
+    try std.testing.expectEqual(42, cpu.register_x);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+}
+
+test "0x27: RLA" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      RLA         BRK
+        &[_]u8{ 0x27, 0xDF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_a = 5;
+    cpu.mem_write(0xDF, 42);
+    cpu.run();
+
+    try std.testing.expectEqual(4, cpu.register_a);
+    try std.testing.expect(!cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+}
+
+test "0x67: RRA" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      RRA         BRK
+        &[_]u8{ 0x67, 0xDF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.mem_write(0xDF, 42);
+    cpu.run();
+
+    try std.testing.expectEqual(21, cpu.register_a);
+    try std.testing.expect(!cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+    try std.testing.expect(!cpu.status.overflow_flag);
+}
+
+test "0x07: SLO" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      SLO         BRK
+        &[_]u8{ 0x07, 0xDF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_a = 5;
+    cpu.mem_write(0xDF, 42);
+    cpu.run();
+
+    try std.testing.expectEqual(85, cpu.register_a);
+    try std.testing.expect(!cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+}
+
+test "0x47: SRE" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      SRE         BRK
+        &[_]u8{ 0x47, 0xDF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_a = 5;
+    cpu.mem_write(0xDF, 42);
+    cpu.run();
+
+    try std.testing.expectEqual(16, cpu.register_a);
+    try std.testing.expect(!cpu.status.carry_flag);
+    try std.testing.expect(!cpu.status.zero_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+}
+
+test "0x9E: SXA" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      SXA               BRK
+        &[_]u8{ 0x9E, 0x00, 0x10, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_x = 5;
+    cpu.register_y = 0x05;
+    cpu.run();
+
+    try std.testing.expectEqual(1, cpu.mem_read(0x1005));
+}
+
+test "0x9C: SYA" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      SYA               BRK
+        &[_]u8{ 0x9C, 0x00, 0x10, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_x = 0x05;
+    cpu.register_y = 5;
+    cpu.run();
+
+    try std.testing.expectEqual(1, cpu.mem_read(0x1005));
+}
+
+test "0x8B: XAA" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      XAA         BRK
+        &[_]u8{ 0x8B, 0xFF, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_x = 5;
+    cpu.run();
+
+    try std.testing.expectEqual(5, cpu.register_a);
+    try std.testing.expect(!cpu.status.zero_flag);
+    try std.testing.expect(!cpu.status.negative_flag);
+}
+
+test "0x9B: XAS" {
+    const allocator = std.testing.allocator;
+    const test_rom = try rom.TestRom.testRom(
+        allocator,
+        //      XAS               BRK
+        &[_]u8{ 0x9B, 0x00, 0x10, 0x00 },
+    );
+    const bus = Bus.init(try Rom.load(test_rom));
+    defer allocator.free(test_rom);
+
+    var cpu = CPU.init(bus);
+    cpu.register_y = 5;
+    cpu.register_x = 2;
+    cpu.register_a = 2;
+    cpu.run();
+
+    try std.testing.expectEqual(0, cpu.mem_read(0x1005));
+    try std.testing.expectEqual(2, cpu.sp);
 }
