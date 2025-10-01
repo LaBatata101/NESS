@@ -8,6 +8,7 @@ pub const CPU = cpu.CPU;
 pub const Rom = rom.Rom;
 pub const Bus = bus.Bus;
 pub const opcodes = @import("opcodes.zig");
+pub const trace = @import("trace.zig").trace;
 
 test {
     std.testing.refAllDecls(@This());
