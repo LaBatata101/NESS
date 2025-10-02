@@ -13,9 +13,10 @@ pub const Mirroring = enum {
 pub const Rom = struct {
     /// PRG ROM is mapped to address `0x8000..0x10000`.
     prg_rom: []u8,
+    /// CHR ROM is mapped to address `0..0x1FFF`
     chr_rom: []u8,
     mapper: u8,
-    screen_mirroring: Mirroring,
+    mirroring: Mirroring,
 
     const Self = @This();
 
@@ -61,7 +62,7 @@ pub const Rom = struct {
 
         return .{
             .mapper = mapper,
-            .screen_mirroring = screen_mirroring,
+            .mirroring = screen_mirroring,
             .prg_rom = raw[prg_rom_start..(prg_rom_start + prg_rom_size)],
             .chr_rom = raw[chr_rom_start..(chr_rom_start + chr_rom_size)],
         };
@@ -127,7 +128,7 @@ test "ROM creation" {
     try std.testing.expect(std.mem.eql(u8, &prg_rom, rom.prg_rom));
     try std.testing.expect(std.mem.eql(u8, &chr_rom, rom.chr_rom));
     try std.testing.expectEqual(3, rom.mapper);
-    try std.testing.expectEqual(Mirroring.VERTICAL, rom.screen_mirroring);
+    try std.testing.expectEqual(Mirroring.VERTICAL, rom.mirroring);
 }
 
 test "ROM with trainer section" {
@@ -152,7 +153,7 @@ test "ROM with trainer section" {
     try std.testing.expect(std.mem.eql(u8, &prg_rom, rom.prg_rom));
     try std.testing.expect(std.mem.eql(u8, &chr_rom, rom.chr_rom));
     try std.testing.expectEqual(3, rom.mapper);
-    try std.testing.expectEqual(Mirroring.VERTICAL, rom.screen_mirroring);
+    try std.testing.expectEqual(Mirroring.VERTICAL, rom.mirroring);
 }
 
 test "ROM NES2.0 format not supported" {

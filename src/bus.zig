@@ -1,5 +1,6 @@
 const std = @import("std");
 const Rom = @import("rom.zig").Rom;
+const PPU = @import("ppu.zig").PPU;
 
 const RAM: u16 = 0x0000;
 const RAM_MIRRORS_END: u16 = 0x2000;
@@ -43,22 +44,35 @@ pub const Bus = struct {
     /// `0x1000` or `0x1800` for reads or writes.
     ram: [2048]u8,
     rom: Rom,
+    ppu: PPU,
 
     const Self = @This();
 
     pub fn init(rom: Rom) Self {
-        return .{ .ram = [_]u8{0} ** 2048, .rom = rom };
+        return .{
+            .ram = [_]u8{0} ** 2048,
+            .rom = rom,
+            .ppu = PPU.init(rom.chr_rom, rom.prg_rom),
+        };
     }
 
     pub fn mem_read(self: Self, addr: u16) u8 {
         if (addr >= RAM and addr < RAM_MIRRORS_END) {
             const mirror_down_addr = addr & 0b00000111_11111111;
             return self.ram[mirror_down_addr];
-        } else if (addr >= PPU_REGISTERS and addr < PPU_REGISTERS_MIRRORS_END) {
-            _ = addr & 0b00100000_00000111;
-            std.log.warn("PPU not supported yet!", .{});
+        } else if (addr == 0x2000 or addr == 0x2001 or addr == 0x2003 or addr == 0x2005 or addr == 0x2006 or addr == 0x4014) {
+            std.log.warn("Attempt to read from write-only PPU address {X:04}", .{addr});
             return 0;
-        } else if (addr >= 0x8000 and addr < 0x10000) {
+        } else if (addr == 0x2002) {
+            return self.ppu.status_read();
+        } else if (addr == 0x2004) {
+            return self.ppu.oam_data_read();
+        } else if (addr == 0x2007) {
+            return self.ppu.data_read();
+        } else if (addr >= 0x2008 and addr < PPU_REGISTERS_MIRRORS_END) {
+            const mirror_down_addr = addr & 0b00100000_00000111;
+            return self.mem_read(mirror_down_addr);
+        } else if (addr >= 0x8000 and addr <= 0xFFFF) {
             return self.read_prg_rom(addr);
         } else {
             std.log.warn("Ignoring mem read at 0x{X:04}", .{addr});
@@ -70,9 +84,23 @@ pub const Bus = struct {
         if (addr >= RAM and addr <= RAM_MIRRORS_END) {
             const mirror_down_addr = addr & 0b11111111111;
             self.ram[mirror_down_addr] = data;
-        } else if (addr >= PPU_REGISTERS and addr <= PPU_REGISTERS_MIRRORS_END) {
-            _ = addr & 0b00100000_00000111;
-            std.log.warn("PPU not supported yet!", .{});
+        } else if (addr == 0x2000) {
+            self.ppu.ctrl_write(data);
+        } else if (addr == 0x2001) {
+            self.ppu.mask_write(data);
+        } else if (addr == 0x2003) {
+            self.ppu.oam_write(data);
+        } else if (addr == 0x2004) {
+            self.ppu.oam_data_write(data);
+        } else if (addr == 0x2005) {
+            self.ppu.scroll_write(data);
+        } else if (addr == 0x2006) {
+            self.ppu.addr_write(data);
+        } else if (addr == 0x2007) {
+            self.ppu.data_write(data);
+        } else if (addr >= 0x2008 and addr <= PPU_REGISTERS_MIRRORS_END) {
+            const mirror_down_addr = addr & 0b00100000_00000111;
+            self.mem_write(mirror_down_addr, data);
         } else if (addr >= 0x8000 and addr <= 0xFFFF) {
             @panic("Attempt to write to cartridge ROM memory space");
         } else {
