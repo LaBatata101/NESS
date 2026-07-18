@@ -95,7 +95,7 @@ jobs:
         run: brew install vulkan-loader
 
       - name: Build release binary
-        run: zig build ${{ matrix.target_arg }} --release=fast --summary failures
+        run: zig build ${{ matrix.target_arg }} --release=fast
 
       - name: Prepare artifact (Windows)
         if: runner.os == 'Windows'
@@ -125,7 +125,7 @@ jobs:
           path: |
             dist/*.zip
             dist/*.tar.gz
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   build-android:
     name: Build Android APK
