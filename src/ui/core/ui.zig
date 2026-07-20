@@ -2281,6 +2281,8 @@ pub const Window = struct {
 
 const SecondaryWindow = struct {
     inner: *Window,
+    // Used to correctly scale the "Settings" window UI elements.
+    original_width: i32,
     /// Opaque pointer forwarded to draw_fn as user data.
     user_data: ?*anyopaque = null,
     draw_fn: ?*const fn (*UI, user_data: ?*anyopaque) void = null,
@@ -2469,15 +2471,16 @@ pub const UI = struct {
             c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY,
         ));
         const font_cache = try FontCache.init(allocator, gpu_device, Window.currentDisplayScale(win_ptr));
+        const display_scale = Window.currentDisplayScale(win_ptr);
         main_window.* = .{
             .ptr = win_ptr,
-            .logical_height = @floatFromInt(height),
-            .logical_width = @floatFromInt(width),
+            .logical_width = @as(f32, @floatFromInt(width)) / display_scale,
+            .logical_height = @as(f32, @floatFromInt(height)) / display_scale,
             .pixel_width = @intCast(width),
             .pixel_height = @intCast(height),
             .window_width = width,
             .window_height = height,
-            .display_scale = Window.currentDisplayScale(win_ptr),
+            .display_scale = display_scale,
             .safe_area = Window.fullWindowArea(width, height),
             .title = title,
             .ctx = ui_ctx,
@@ -2703,15 +2706,16 @@ pub const UI = struct {
             height,
             c.SDL_WINDOW_ALWAYS_ON_TOP | c.SDL_WINDOW_HIGH_PIXEL_DENSITY,
         ));
+        const display_scale = Window.currentDisplayScale(win_ptr);
         window.* = .{
             .ptr = win_ptr,
-            .logical_width = @floatFromInt(width),
-            .logical_height = @floatFromInt(height),
+            .logical_width = @as(f32, @floatFromInt(width)) / display_scale,
+            .logical_height = @as(f32, @floatFromInt(height)) / display_scale,
             .pixel_width = @intCast(width),
             .pixel_height = @intCast(height),
             .window_width = width,
             .window_height = height,
-            .display_scale = Window.currentDisplayScale(win_ptr),
+            .display_scale = display_scale,
             .safe_area = Window.fullWindowArea(width, height),
             .title = title,
             .ctx = UIContext.init(
@@ -2731,6 +2735,11 @@ pub const UI = struct {
                 .measure_cache = &window.ctx.text_measure_cache,
             },
         };
+        if (display_scale > 1.0) {
+            const new_width: i32 = @intFromFloat(@as(f32, @floatFromInt(window.window_width)) * display_scale);
+            sdlError(c.SDL_SetWindowSize(window.ptr, new_width, window.window_height));
+            window.updateWindowSize();
+        }
 
         clay.setDebugModeEnabled(debug_mode_enabled);
         setWindowIcon(window.ptr);
@@ -2741,6 +2750,7 @@ pub const UI = struct {
 
         self.secondary_windows.append(self.allocator, .{
             .inner = window,
+            .original_width = width,
             .user_data = params.user_data,
             .draw_fn = params.draw_fn,
             .on_close = params.on_close,
@@ -3059,7 +3069,23 @@ pub const UI = struct {
                     }
                 }
             },
-            c.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED => self.current_window.updateWindowSize(),
+            c.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED => {
+                if (event.window.windowID == self.main_window.id()) {
+                    self.main_window.updateWindowSize();
+                    return;
+                }
+
+                // There's only one secondary window in this program, which is the "Settings" window.
+                // We need to update the width of the "Settings" window proportionally to the scale so the UI elements
+                // are correctly placed.
+                for (self.secondary_windows.items) |window| {
+                    const display_scale = Window.currentDisplayScale(window.inner.ptr);
+                    const new_width: i32 = @intFromFloat(@as(f32, @floatFromInt(window.original_width)) * display_scale);
+                    sdlError(c.SDL_SetWindowSize(window.inner.ptr, new_width, window.inner.window_height));
+
+                    window.inner.updateWindowSize();
+                }
+            },
             c.SDL_EVENT_WINDOW_SAFE_AREA_CHANGED => sdlError(c.SDL_GetWindowSafeArea(
                 self.current_window.ptr,
                 &self.current_window.safe_area,
