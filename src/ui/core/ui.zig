@@ -2169,6 +2169,7 @@ pub const Window = struct {
 
         sdlError(c.SDL_GetWindowSize(self.ptr, &self.window_width, &self.window_height));
         sdlError(c.SDL_GetWindowSizeInPixels(self.ptr, &self.pixel_width, &self.pixel_height));
+        sdlError(c.SDL_GetWindowSafeArea(self.ptr, &self.safe_area));
 
         self.logical_width = @as(f32, @floatFromInt(self.pixel_width)) / self.display_scale;
         self.logical_height = @as(f32, @floatFromInt(self.pixel_height)) / self.display_scale;
@@ -2199,21 +2200,20 @@ pub const Window = struct {
     pub fn safeAreaPadding(self: *const Window) clay.Padding {
         if (builtin.abi.isAndroid()) {
             const orientation = android.currentScreenOrientation() orelse .unknown;
-            const xy_inset: u16 = @intFromFloat(self.logicalFromWindowX(@floatFromInt(self.window_width - (self.safe_area.x + self.safe_area.w))));
+            const xy_inset: u16 = @intFromFloat(
+                self.logicalFromWindowX(@floatFromInt(self.window_width - (self.safe_area.x + self.safe_area.w))),
+            );
             return .{
                 .left = if (orientation == .landscape) xy_inset else 0,
                 .right = if (orientation == .landscape_flipped) xy_inset else 0,
                 .top = @intFromFloat(self.logicalFromWindowY(@floatFromInt(self.safe_area.y))),
-                .bottom = @intFromFloat(self.logicalFromWindowY(@floatFromInt(self.window_height - (self.safe_area.y + self.safe_area.h)))),
-            };
-        } else {
-            return .{
-                .left = 0,
-                .right = 0,
-                .top = @intFromFloat(self.logicalFromWindowY(@floatFromInt(self.safe_area.y))),
-                .bottom = @intFromFloat(self.logicalFromWindowY(@floatFromInt(self.window_height - (self.safe_area.y + self.safe_area.h)))),
+                .bottom = @intFromFloat(
+                    self.logicalFromWindowY(@floatFromInt(self.window_height - (self.safe_area.y + self.safe_area.h))),
+                ),
             };
         }
+
+        return .{};
     }
 
     fn logicalRectToPixel(self: *const Window, rect: c.SDL_Rect) c.SDL_Rect {
@@ -2801,6 +2801,23 @@ pub const UI = struct {
         self.main_window.update();
         self.updateGamepadStates(self.main_window.ctx.dt);
         self.on_screen_controller = .{};
+
+        clay.beginLayout();
+    }
+
+    /// Begin a frame from an SDL live-resize event watcher. On Windows the
+    /// normal event loop is blocked by the system's modal resize loop, so this
+    /// must not poll SDL events.
+    pub fn beginFrameNoSDLEvents(self: *Self) void {
+        self.main_window.ctx.reset();
+        for (self.secondary_windows.items) |window| {
+            window.inner.ctx.reset();
+        }
+
+        // Resize events are still queued while the Win32 modal loop is active.
+        // Query the window directly so this frame uses the current window size.
+        self.main_window.updateWindowSize();
+        self.main_window.update();
 
         clay.beginLayout();
     }

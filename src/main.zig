@@ -19,6 +19,20 @@ pub const std_options: std.Options = .{
 
 pub const panic = std.debug.FullPanic(customPanic);
 
+// Handles window resizes on Windows.
+const CallbackParams = struct { ui: *UI, app_state: *gui.AppState };
+fn handleWindowsResize(userdata: ?*anyopaque, event: [*c]c.SDL_Event) callconv(.c) bool {
+    if (event == null or event.*.type != c.SDL_EVENT_WINDOW_EXPOSED) return true;
+
+    const ctx: *CallbackParams = @ptrCast(@alignCast(userdata.?));
+    if (event.*.window.windowID != ctx.ui.main_window.id()) return true;
+
+    ctx.ui.beginFrameNoSDLEvents();
+    gui.drawGUI(ctx.ui, ctx.app_state);
+    ctx.ui.endFrame();
+    return true;
+}
+
 fn androidAndFileLogFn(
     comptime message_level: std.log.Level,
     comptime scope: @Type(.enum_literal),
@@ -64,6 +78,10 @@ pub fn main() !void {
     defer ui.deinit();
     var app_state = gui.AppState.init(allocator, ui);
     defer app_state.deinit();
+
+    var live_resize_ctx = CallbackParams{ .ui = ui, .app_state = &app_state };
+    if (builtin.os.tag == .windows) sdlError(c.SDL_AddEventWatch(handleWindowsResize, &live_resize_ctx));
+    defer if (builtin.os.tag == .windows) c.SDL_RemoveEventWatch(handleWindowsResize, &live_resize_ctx);
 
     ui.setVSync(app_state.settings.vsync);
 
