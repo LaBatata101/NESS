@@ -305,7 +305,7 @@ fn run_test_rom(allocator: std.mem.Allocator, path: []const u8) !TestResult {
     defer system.deinit();
     system.reset();
 
-    const speed = ness.gui.EmulationSpeed.quadruple;
+    const speed = ness.settings.EmulationSpeed.quadruple;
     var frame_acc: f32 = 0;
 
     var test_started = false;
