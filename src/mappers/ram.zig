@@ -179,9 +179,11 @@ pub const BatteryBackedRam = struct {
                 else => return err,
             };
 
-            const display_name = try android.displayName(alloc, rom_path);
-            defer if (display_name) |name| alloc.free(name);
-            const stem = display_name orelse std.fs.path.stem(rom_path);
+            const rom_name = if (builtin.abi.isAndroid())
+                (android.displayName(alloc, rom_path) catch @panic("JNI error")).?
+            else
+                std.fs.path.stem(rom_path);
+            defer if (builtin.abi.isAndroid()) alloc.free(rom_name);
 
             const dir = try std.fs.path.join(alloc, &.{ data_dir_path, "save-files" });
             defer alloc.free(dir);
@@ -189,7 +191,7 @@ pub const BatteryBackedRam = struct {
             return std.fmt.allocPrint(
                 alloc,
                 "{s}" ++ std.fs.path.sep_str ++ "{s}.sav",
-                .{ dir, stem },
+                .{ dir, rom_name },
             );
         }
 

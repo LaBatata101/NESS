@@ -764,17 +764,20 @@ pub const AppState = struct {
         self.emulation_lock.lock();
         defer self.emulation_lock.unlock();
         self.settings.emulation_speed = speed;
+
+    pub fn romDisplayName(self: *const Self) []const u8 {
+        return if (builtin.abi.isAndroid())
+            (android.displayName(self.alloc, self.current_rom_path.?) catch @panic("JNI error")).?
+        else
+            self.alloc.dupe(u8, std.fs.path.stem(self.current_rom_path.?)) catch @panic("OOM");
     }
 
     pub fn saveStateSlot(self: *Self, slot: usize) void {
         std.debug.assert(self.current_rom_path != null);
         std.debug.assert(slot < save_state.SLOT_COUNT);
 
-        const name = if (builtin.abi.isAndroid())
-            (android.displayName(self.alloc, self.current_rom_path.?) catch @panic("JNI error")).?
-        else
-            std.fs.path.stem(self.current_rom_path.?);
-        defer if (builtin.abi.isAndroid()) self.alloc.free(name);
+        const name = self.romDisplayName();
+        defer self.alloc.free(name);
 
         self.emulation_lock.lock();
         defer self.emulation_lock.unlock();
@@ -793,11 +796,8 @@ pub const AppState = struct {
     pub fn loadStateSlot(self: *Self, slot: usize) void {
         std.debug.assert(self.current_rom_path != null);
 
-        const name = if (builtin.abi.isAndroid())
-            (android.displayName(self.alloc, self.current_rom_path.?) catch @panic("JNI error")).?
-        else
-            std.fs.path.stem(self.current_rom_path.?);
-        defer if (builtin.abi.isAndroid()) self.alloc.free(name);
+        const name = self.romDisplayName();
+        defer self.alloc.free(name);
 
         self.emulation_lock.lock();
         defer self.emulation_lock.unlock();
@@ -881,17 +881,9 @@ pub const AppState = struct {
 
     fn saveCurrentGame(self: *Self) void {
         const path = self.current_rom_path orelse return;
-        var android_name: ?[]u8 = null;
-        defer if (android_name) |name| self.alloc.free(name);
 
-        const name = if (builtin.abi.isAndroid()) blk: {
-            android_name = android.displayName(self.alloc, path) catch |err|
-                {
-                    std.log.err("Failed to get ROM name: {s}", .{@errorName(err)});
-                    break :blk "UNKNOWN";
-                };
-            break :blk android_name orelse "UNKNOWN";
-        } else std.fs.path.stem(path);
+        const name = self.romDisplayName();
+        defer self.alloc.free(name);
 
         const elapsed_ms = std.time.milliTimestamp() - self.game_start_time_ms;
         const elapsed_secs: u64 = if (elapsed_ms > 0) @intCast(@divFloor(elapsed_ms, 1000)) else 0;
