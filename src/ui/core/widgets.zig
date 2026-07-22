@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("../../root.zig").c;
 const clay = @import("clay.zig");
 const Color = @import("color.zig").Color;
@@ -1074,6 +1075,7 @@ pub const IconButton = struct {
 pub const TextField = struct {
     id: clay.ElementId,
     params: Params,
+    ctx: *UIContext,
 
     pub const Params = struct {
         id: ?[]const u8 = null,
@@ -1081,6 +1083,8 @@ pub const TextField = struct {
         width: clay.SizingAxis = .grow,
         padding_val: clay.Padding = .all(8),
         corner_radius: f32 = 8,
+        value: []const u8 = "",
+        read_only: bool = false,
     };
     const Self = @This();
 
@@ -1096,27 +1100,37 @@ pub const TextField = struct {
             .cursor_pos = 0,
         } });
 
+        if (!state.text_input.initial_value_appended) {
+            state.text_input.buffer.appendSlice(ctx.persistent_arena.allocator(), params.value) catch
+                @panic("OOM");
+            state.text_input.initial_value_appended = true;
+        }
+
         const is_hovered = clay.hovered();
         const is_focused = if (ctx.frame.focused_id) |fid| fid == element_id.id else false;
 
         ui.setMouseCursorText(is_hovered);
 
         var placeholder = params.placeholder;
-        if (is_hovered and ctx.frame.mouse_pressed) {
+        if (is_hovered and ctx.frame.mouse_pressed and !params.read_only) {
             ctx.frame.focused_id = element_id.id;
             placeholder = "";
-        } else if (!is_hovered and ctx.frame.mouse_pressed and is_focused) {
-            ctx.frame.focused_id = null;
         }
 
-        if (is_focused) {
+        if (is_focused and !params.read_only) {
             if (ctx.frame.text_input.items.len > 0) {
+                state.text_input.show_android_paste_toolbox = false;
                 state.text_input.buffer.appendSlice(ctx.persistent_arena.allocator(), ctx.frame.text_input.items) catch
-                    @panic("panic");
+                    @panic("OOM");
             }
 
             if (ctx.input.isKeyPressed(.BACKSPACE, true) and state.text_input.buffer.items.len > 0) {
                 _ = state.text_input.buffer.pop();
+            }
+
+            const ctrl = ctx.input.isKeyDown(.LCTRL) or ctx.input.isKeyDown(.RCTRL);
+            if (ctrl and ctx.input.isKeyPressed(.V, false)) {
+                appendClipboardText(ctx, &state.text_input.buffer);
             }
         }
 
@@ -1151,7 +1165,7 @@ pub const TextField = struct {
         // When the text field is not focused, end the cursor transparent to avoid layout size change when focusing.
         const cursor_color = if (is_focused and show_cursor) Color.black else Color.black.withAlpha(0);
 
-        _ = clay.openElement();
+        const text_cursor = clay.openElement();
         clay.configureOpenElement(.{
             .layout = .{
                 .sizing = .{ .w = .fixed(2), .h = .fixed(20) },
@@ -1162,7 +1176,67 @@ pub const TextField = struct {
         clay.closeElement(); // End end text cursor
 
         clay.closeElement();
-        return .{ .id = element_id, .params = params };
+
+        var paste_btn_hovered = false;
+        if (builtin.abi.isAndroid()) {
+            if (!params.read_only and is_focused and ctx.activeFingerOverElement(element_id) and ctx.frame.mouse_down) {
+                if (ctx.tickTimer("android_paste_toolbox", 500)) {
+                    ctx.removeTimer("android_paste_toolbox");
+                    state.text_input.show_android_paste_toolbox = true;
+                }
+            } else {
+                ctx.removeTimer("android_paste_toolbox");
+            }
+
+            if (state.text_input.show_android_paste_toolbox) {
+                const container = Float.start(.{
+                    .attach_to = .to_element_with_id,
+                    .parentId = text_cursor.id,
+                    .attach_points = .{ .element = .left_top, .parent = .left_top },
+                    .offset = .{ .x = 2, .y = -30 },
+                });
+                {
+                    const paste_button = Button.start(.{
+                        .text = "Paste",
+                        .bg_color = Color.blue,
+                        .text_color = Color.white,
+                        .font_size = 13,
+                        .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 },
+                        .corner_radius = 4,
+                        .elevation = 0,
+                    }, ctx);
+                    paste_btn_hovered = clay.pointerOver(paste_button.id);
+                    if (paste_button.clicked(ctx)) {
+                        appendClipboardText(ctx, &state.text_input.buffer);
+                        state.text_input.show_android_paste_toolbox = false;
+                    }
+                }
+                container.end();
+            }
+        }
+
+        if (ctx.frame.mouse_pressed and is_focused and !is_hovered and !paste_btn_hovered) {
+            ctx.frame.focused_id = null;
+            state.text_input.show_android_paste_toolbox = false;
+        }
+
+        return .{ .id = element_id, .params = params, .ctx = ctx };
+    }
+
+    fn appendClipboardText(ctx: *UIContext, buffer: *std.ArrayList(u8)) void {
+        const clipboard_text = c.SDL_GetClipboardText();
+        defer c.SDL_free(clipboard_text);
+
+        const text = std.mem.span(clipboard_text);
+        if (text.len == 0) {
+            std.log.debug("Failed to paste clipboard text on text field widget: {s}", .{c.SDL_GetError()});
+        }
+
+        buffer.appendSlice(ctx.persistent_arena.allocator(), text) catch @panic("OOM");
+    }
+
+    pub fn value(self: *const Self) []const u8 {
+        return self.ctx.getWidgetStateById(self.id).?.text_input.buffer.items;
     }
 };
 

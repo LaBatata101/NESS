@@ -639,6 +639,10 @@ pub const UIContext = struct {
         self.timers.put(timerKey(name), .{ .start = c.SDL_GetTicks(), .ms = ms }) catch @panic("OOM");
     }
 
+    pub fn removeTimer(self: *Self, name: []const u8) void {
+        self.removeTimerId(timerKey(name));
+    }
+
     pub fn removeTimerId(self: *Self, id: u64) void {
         _ = self.timers.remove(id);
     }
@@ -778,6 +782,8 @@ pub const WidgetState = union(enum) {
     pub const TextInputState = struct {
         buffer: std.ArrayList(u8),
         cursor_pos: usize,
+        show_android_paste_toolbox: bool = false,
+        initial_value_appended: bool = false,
     };
     pub const ScrollState = struct {
         offset: clay.Vector2,
