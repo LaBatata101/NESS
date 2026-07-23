@@ -1154,11 +1154,13 @@ pub const Key = enum(u16) {
 
 const KeyData = struct {
     event: KeyEventType,
+    press_count_this_frame: u16,
     duration: f32,
     duration_prev: f32,
 
     const default_state: KeyData = .{
         .event = .none,
+        .press_count_this_frame = 0,
         .duration = -1.0,
         .duration_prev = -1.0,
     };
@@ -1266,6 +1268,7 @@ pub const InputContext = struct {
             const key = &self.keys[idx];
             switch (event.event) {
                 .down => if (key.event != .pressed and key.event != .down) {
+                    key.press_count_this_frame +|= 1;
                     key.event = .pressed;
                 },
                 .released => if (key.event == .pressed or key.event == .down) {
@@ -1278,6 +1281,7 @@ pub const InputContext = struct {
 
     pub fn advanceFrame(self: *InputContext) void {
         for (&self.keys) |*key| {
+            key.press_count_this_frame = 0;
             key.event = switch (key.event) {
                 .pressed => .down,
                 .released => .none,
@@ -1306,6 +1310,8 @@ pub const InputContext = struct {
     pub fn isKeyPressed(self: *const InputContext, key: Key, repeat: bool) bool {
         const key_data = self.keys[@intFromEnum(key)];
 
+        if (key_data.press_count_this_frame > 0) return true;
+
         if (key_data.event == .released) return false;
 
         if (key_data.event == .pressed) return true;
@@ -1328,9 +1334,13 @@ pub const InputContext = struct {
         return false;
     }
 
+    pub fn keyPressCount(self: *const InputContext, key: Key) u16 {
+        return self.keys[@intFromEnum(key)].press_count_this_frame;
+    }
+
     pub fn getPressedKey(self: *const InputContext) ?Key {
         for (self.keys, 0..) |key, i| { // TODO: find a way where we don't have to iterate all the keys
-            if (key.event == .pressed) {
+            if (key.press_count_this_frame > 0) {
                 return @enumFromInt(i);
             }
         }

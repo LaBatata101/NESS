@@ -1124,7 +1124,11 @@ pub const TextField = struct {
                     @panic("OOM");
             }
 
-            if (ctx.input.isKeyPressed(.BACKSPACE, true) and state.text_input.buffer.items.len > 0) {
+            var backspace_count = ctx.input.keyPressCount(.BACKSPACE);
+            if (backspace_count == 0 and ctx.input.isKeyPressed(.BACKSPACE, true)) {
+                backspace_count = 1;
+            }
+            while (backspace_count > 0 and state.text_input.buffer.items.len > 0) : (backspace_count -= 1) {
                 _ = state.text_input.buffer.pop();
             }
 
