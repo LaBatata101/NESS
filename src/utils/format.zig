@@ -45,24 +45,3 @@ fn formatDateTime(time: zeit.Time) [19]u8 {
     time.strftime(&writer, "%Y/%m/%d %H:%M:%S") catch unreachable;
     return buf;
 }
-
-pub fn Optional(comptime T: type) type {
-    return union(enum) {
-        value: T,
-        none,
-
-        pub fn is_some_and(self: @This(), fun: fn (value: T) bool) bool {
-            return switch (self) {
-                .value => |value| fun(value),
-                .none => false,
-            };
-        }
-
-        pub fn unwrap_or(self: @This(), default: T) T {
-            return switch (self) {
-                .value => |value| value,
-                .none => default,
-            };
-        }
-    };
-}

@@ -1,0 +1,39 @@
+# Single, hand-maintained source for the docs landing page (scripts/docs/gen_landing.py).
+# Keep this honest when bindings expose different portions of the iroh 1.0
+# surface. Zig currently focuses on the core networking APIs.
+#
+# Each language links out to where its API reference is hosted. Swift is also
+# on the Swift Package Index, but every language's primary docs are the
+# self-hosted GitHub Pages copy under ./<id>/ so they are always current.
+
+languages:
+  - id: swift
+    name: Swift
+    docs: ./swift/documentation/irohlib/
+    extra:
+      label: "also on Swift Package Index"
+      url: "https://swiftpackageindex.com/n0-computer/iroh-ffi/documentation"
+  - id: kotlin
+    name: Kotlin
+    docs: ./kotlin/
+  - id: python
+    name: Python
+    docs: ./python/
+  - id: js
+    name: JavaScript
+    docs: ./js/
+  - id: zig
+    name: Zig 0.15.2
+    docs: https://github.com/n0-computer/iroh-ffi/blob/main/README.zig.md
+
+features:
+  - name: Endpoints
+    support: { swift: true, kotlin: true, python: true, js: true, zig: true }
+  - name: Protocols (accept loop / ALPN)
+    support: { swift: true, kotlin: true, python: true, js: true, zig: true }
+  - name: Connections & multipath
+    support: { swift: true, kotlin: true, python: true, js: true, zig: false }
+  - name: Custom relays (full RelayMap)
+    support: { swift: true, kotlin: true, python: true, js: true, zig: false }
+  - name: iroh-services binding
+    support: { swift: true, kotlin: true, python: true, js: true, zig: false }

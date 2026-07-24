@@ -24,6 +24,10 @@ pub const SDLAudioOut = struct {
     // To disable the audio output when running the test ROMs from CLI.
     disable: bool = false,
     paused: std.atomic.Value(bool) = .init(false),
+    /// Normal emulation uses audio backpressure to pace its worker thread.
+    /// Authoritative netplay clients run frames while servicing UI events, so
+    /// they must drop excess presentation samples instead of blocking there.
+    producer_blocking: std.atomic.Value(bool) = .init(true),
     current_speed: f32 = 1.0,
 
     const Self = @This();
@@ -89,7 +93,8 @@ pub const SDLAudioOut = struct {
     }
 
     pub fn setPaused(self: *Self, paused: bool) void {
-        self.paused.store(paused, .release);
+        if (self.paused.swap(paused, .acq_rel) == paused) return;
+
         self.clearQueuedSamples();
         if (paused) {
             _ = c.SDL_PauseAudioStreamDevice(self.stream);
@@ -98,12 +103,34 @@ pub const SDLAudioOut = struct {
         }
     }
 
-    pub fn play(self: *Self, buffer: []const Sample) void {
-        if (self.disable or self.paused.load(.acquire)) return;
+    pub fn setProducerBlocking(self: *Self, blocking: bool) void {
+        self.producer_blocking.store(blocking, .release);
 
-        self.wait(buffer.len);
+        // Wake a producer that may already be waiting for space so it can
+        // observe the new policy immediately.
         self.mutex.lock();
         defer self.mutex.unlock();
+        self.cond.broadcast();
+    }
+
+    pub fn play(self: *Self, buffer: []const Sample) void {
+        if (self.disable) return;
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        while (!self.paused.load(.acquire) and
+            self.producer_blocking.load(.acquire) and
+            self.buffer.input_samples + buffer.len > BUFFER_SIZE)
+        {
+            self.cond.wait(&self.mutex);
+        }
+
+        if (self.paused.load(.acquire) or
+            self.buffer.input_samples + buffer.len > BUFFER_SIZE)
+        {
+            return;
+        }
 
         if (self.buffer.too_slow) {
             std.log.warn("SDL: Audio transfer can't keep up", .{});
@@ -130,15 +157,6 @@ pub const SDLAudioOut = struct {
     pub fn sampleRate(self: *const Self) f64 {
         _ = self;
         return @floatFromInt(OUT_SAMPLE_RATE);
-    }
-
-    pub fn wait(self: *Self, in_size: usize) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        while (self.buffer.input_samples + in_size > BUFFER_SIZE) {
-            self.cond.wait(&self.mutex);
-        }
     }
 
     fn clearQueuedSamples(self: *Self) void {

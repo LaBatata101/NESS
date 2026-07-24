@@ -1,6 +1,6 @@
 # NESkwik
 
-NESkwik is a cross-platform (Linux, Windows, MacOS and Android) NES (Nintendo Entertainment System) emulator written in Zig. It has a custom desktop UI powered by [Clay](https://github.com/nicbarker/clay), audio output, gamepad support, a simple debug UI, and support for [RetroArch shaders](https://github.com/libretro/slang-shaders).
+NESkwik is a cross-platform (Linux, Windows, MacOS and Android) NES (Nintendo Entertainment System) emulator written in Zig. It has a custom desktop UI powered by [Clay](https://github.com/nicbarker/clay), audio output, gamepad support, P2P multiplayer, a simple debug UI, and support for [RetroArch shaders](https://github.com/libretro/slang-shaders).
 
 
 ## Screenshots
@@ -22,6 +22,7 @@ NESkwik is a cross-platform (Linux, Windows, MacOS and Android) NES (Nintendo En
 - 6502 CPU, PPU, and APU emulation.
 - SDL3-based desktop UI with Vulkan rendering.
 - Keyboard and gamepad input for two players.
+- P2P multiplayer for co-op games.
 - Configurable controls, aspect ratio, VSync, emulation speed.
 - Pause, reset, stop, fullscreen, and step/debug controls.
 - RetroArch `.slangp` shader preset loading
@@ -40,6 +41,7 @@ That totals to around **1900** supported games of the NES library.
 ## Build - Requirements
 
 - Zig 0.15.2.
+- Rust 1.91 or newer (for [`iroh-ffi`](https://github.com/n0-computer/iroh-ffi) used to implement multiplayer).
 - Vulkan runtime and development headers/library available on your system.
 
 ### Android
@@ -50,11 +52,15 @@ Android builds require the Android SDK, command-line tools, platform tools, NDK,
 - JDK with `JDK_HOME` or `JAVA_HOME` set, or available on `PATH`.
 - Android Build Tools `36.1.0`.
 - Android NDK `28.2.13676358`.
+- Rust Android targets for each ABI being built.
+- [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk).
 
 If the exact build tools or NDK versions are missing, install them with `sdkmanager`:
 
 ```sh
 sdkmanager "build-tools;36.1.0" "ndk;28.2.13676358" "platform-tools" "platforms;android-35"
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install --locked cargo-ndk
 ```
 
 #### Runtime Requirements
@@ -63,12 +69,35 @@ sdkmanager "build-tools;36.1.0" "ndk;28.2.13676358" "platform-tools" "platforms;
 - Vulkan support. 
 
 ## Build
-
+To build the project simply run:
 ```sh
 zig build --release=fast
 ```
 
-The executable is located at `zig-out/bin/neskwik`.
+The final executable is located at `zig-out/bin/neskwik`.
+
+### Cross-compilation
+
+To cross-compile the x86-64 Windows GNU build, install the Rust target and `cargo-zigbuild` once:
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+cargo install --locked cargo-zigbuild
+```
+
+Then build the Windows executable directly through Zig:
+
+```sh
+zig build -Dtarget=x86_64-windows --release=fast
+```
+
+The executable is written to `zig-out/bin/neskwik.exe`.
+
+Other non-native desktop targets require a compatible prebuilt `iroh-ffi` static archive. Pass the directory containing that archive with:
+
+```sh
+zig build -Dtarget=<zig-target> -Diroh-lib-dir=/absolute/path/to/iroh/library
+```
 
 ### Android
 
@@ -163,6 +192,12 @@ Run the unit test suite:
 
 ```sh
 zig build test
+```
+
+Run the relay-free multiplayer loopback test:
+
+```sh
+NESKWIK_NETPLAY_LOOPBACK_TEST=1 zig build test -Dtest-filter="local loopback session"
 ```
 
 Run ROM-based tests:

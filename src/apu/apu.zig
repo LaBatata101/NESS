@@ -149,8 +149,7 @@ pub const APU = struct {
     }
 
     pub fn loadState(self: *Self, snapshot: *const Snapshot) void {
-        self.pulse_buffer.reset();
-        self.tnd_buffer.reset();
+        self.resetOutputBuffers();
         self.pulse1.loadState(snapshot.pulse1);
         self.pulse2.loadState(snapshot.pulse2);
         self.triangle.loadState(snapshot.triangle);
@@ -164,6 +163,14 @@ pub const APU = struct {
         self.last_frame_cyc = snapshot.last_frame_cyc;
         self.irq_interrupt = snapshot.irq_interrupt;
         self.jitter = snapshot.jitter;
+    }
+
+    /// Clears presentation-only blip state without changing NES-visible APU
+    /// state. Netplay calls this on the snapshot source so it matches the
+    /// destination, whose output buffers are cleared by loadState().
+    pub fn resetOutputBuffers(self: *Self) void {
+        self.pulse_buffer.reset();
+        self.tnd_buffer.reset();
     }
 
     pub fn irq_triggered(self: *const Self) bool {

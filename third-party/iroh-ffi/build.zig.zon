@@ -1,0 +1,25 @@
+.{
+    .name = .iroh,
+    .version = "1.1.0",
+    .fingerprint = 0x911345a9c0d0b201, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "zig",
+        "include",
+        "Cargo.toml",
+        "Cargo.lock",
+        "build.rs",
+        "iroh.pc.in",
+        "iroh-js",
+        "src",
+        "uniffi.toml",
+        "uniffi-bindgen.rs",
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
+        "README.zig.md",
+        "README.md",
+    },
+}

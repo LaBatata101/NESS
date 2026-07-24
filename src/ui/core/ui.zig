@@ -11,7 +11,7 @@ const vulkan = @import("../../root.zig").vulkan;
 const FPSManager = @import("../../render.zig").FPSManager;
 const shaders = @import("shaders.zig");
 const utils = @import("viewport.zig");
-const Optional = @import("../../utils/misc.zig").Optional;
+const Optional = @import("../../utils/types.zig").Optional;
 const android = @import("../../utils/android.zig");
 const pipeline = @import("../../shaders/pipeline.zig");
 const GamepadButton = @import("../bindings.zig").GamepadButton;
@@ -762,7 +762,7 @@ pub const FrameState = struct {
 
     hot_id: ?u32 = null, // Widget under cursor
     active_id: ?u32 = null, // Widget being interacted with
-    focused_id: ?u32 = null, // Widget with keyboard focus
+    focused_id: ?clay.ElementId = null, // Widget with keyboard focus
 };
 
 pub const WidgetStateMap = std.AutoHashMap(u32, WidgetState);
@@ -2159,6 +2159,11 @@ pub const Window = struct {
         return .{ .x = 0, .y = 0, .w = width, .h = height };
     }
 
+    pub fn setWindowSize(self: *Window, width: i32, height: i32) void {
+        sdlError(c.SDL_SetWindowSize(self.ptr, width, height));
+        self.updateWindowSize();
+    }
+
     fn updateWindowSize(self: *Window) void {
         self.display_scale = currentDisplayScale(self.ptr);
 
@@ -2279,6 +2284,7 @@ const SecondaryWindow = struct {
     /// Opaque pointer forwarded to draw_fn as user data.
     user_data: ?*anyopaque = null,
     draw_fn: ?*const fn (*UI, user_data: ?*anyopaque) void = null,
+    on_close: ?*const fn (*UI, user_data: ?*anyopaque) void = null,
 
     fn deinit(self: *const @This(), alloc: std.mem.Allocator, device: ?*c.SDL_GPUDevice) void {
         self.inner.deinit(alloc, device);
@@ -2369,6 +2375,7 @@ pub const UI = struct {
         dpad_down,
         dpad_left,
         dpad_right,
+        copy,
 
         fn data(self: @This()) []const u8 {
             return switch (self) {
@@ -2383,6 +2390,7 @@ pub const UI = struct {
                 .dpad_down => @embedFile("dpad_down_icon"),
                 .dpad_left => @embedFile("dpad_left_icon"),
                 .dpad_right => @embedFile("dpad_right_icon"),
+                .copy => @embedFile("copy_icon"),
             };
         }
     };
@@ -2680,10 +2688,11 @@ pub const UI = struct {
         width: i32,
         height: i32,
         params: struct {
-            draw_fn_data: ?*anyopaque = null,
+            user_data: ?*anyopaque = null,
             draw_fn: ?*const fn (*UI, user_data: ?*anyopaque) void = null,
+            on_close: ?*const fn (*UI, user_data: ?*anyopaque) void = null,
         },
-    ) void {
+    ) *Window {
         const previous_clay_ctx = clay.getCurrentContext();
         const debug_mode_enabled = clay.isDebugModeEnabled();
 
@@ -2732,21 +2741,33 @@ pub const UI = struct {
 
         self.secondary_windows.append(self.allocator, .{
             .inner = window,
-            .user_data = params.draw_fn_data,
+            .user_data = params.user_data,
             .draw_fn = params.draw_fn,
+            .on_close = params.on_close,
         }) catch @panic("OOM");
 
         clay.setCurrentContext(previous_clay_ctx);
+        return window;
     }
 
-    pub fn closeCurrentWindow(self: *Self) void {
+    pub fn closeCurrentWindow(self: *const Self) void {
+        self.closeWindow(self.current_window.id());
+    }
+
+    pub fn closeWindow(_: *const Self, window_id: c.SDL_WindowID) void {
         var event: c.SDL_Event = std.mem.zeroes(c.SDL_Event);
         event.type = c.SDL_EVENT_WINDOW_CLOSE_REQUESTED;
         event.window.type = c.SDL_EVENT_WINDOW_CLOSE_REQUESTED;
         event.window.timestamp = c.SDL_GetTicksNS();
-        event.window.windowID = self.current_window.id();
+        event.window.windowID = window_id;
 
         sdlError(c.SDL_PushEvent(&event));
+    }
+
+    pub fn setClipboardText(self: *Self, value: []const u8) !void {
+        const terminated = try self.allocator.dupeZ(u8, value);
+        defer self.allocator.free(terminated);
+        sdlError(c.SDL_SetClipboardText(terminated));
     }
 
     pub fn beginFrame(self: *Self) void {
@@ -2786,6 +2807,7 @@ pub const UI = struct {
 
     pub fn endFrame(self: *Self) void {
         const render_commands = clay.endLayout(self.current_window.ctx.dt);
+        self.syncTextInput(self.main_window);
         self.renderCommands(self.main_window, render_commands);
 
         // Render secondary windows
@@ -2798,11 +2820,30 @@ pub const UI = struct {
                 draw_fn(self, window.user_data);
             }
 
-            self.renderCommands(window.inner, clay.endLayout(self.current_window.ctx.dt));
+            const secondary_render_commands = clay.endLayout(self.current_window.ctx.dt);
+            self.syncTextInput(window.inner);
+            self.renderCommands(window.inner, secondary_render_commands);
         }
 
         clay.setCurrentContext(self.main_window.ctx.clay_ctx);
         applyMouseCursor();
+    }
+
+    fn syncTextInput(_: *const Self, window: *Window) void {
+        const focused_id = window.ctx.frame.focused_id orelse return;
+
+        const data = clay.getElementData(focused_id);
+        if (!data.found) {
+            window.ctx.frame.focused_id = null;
+            if (c.SDL_TextInputActive(window.ptr)) sdlError(c.SDL_StopTextInput(window.ptr));
+            sdlError(c.SDL_SetTextInputArea(window.ptr, null, 0));
+            return;
+        }
+
+        const bb = data.bounding_box;
+        const area = window.logicalBoundsToPixel(bb.x, bb.y, bb.width, bb.height);
+        sdlError(c.SDL_SetTextInputArea(window.ptr, &area, area.w));
+        if (!c.SDL_TextInputActive(window.ptr)) sdlError(c.SDL_StartTextInput(window.ptr));
     }
 
     pub fn isKeyPressed(self: *const Self, key: Key) bool {
@@ -2991,7 +3032,9 @@ pub const UI = struct {
                 if (closed_window_id == self.main_window.id()) {
                     self.quit = true;
                 } else {
+                    // We only have one secondary window opened at most, so this is fine.
                     const secondary_window = self.secondary_windows.pop() orelse unreachable;
+                    if (secondary_window.on_close) |callback| callback(self, secondary_window.user_data);
                     self.pending_close_window = secondary_window.inner;
 
                     if (self.current_window == secondary_window.inner) {
@@ -3053,12 +3096,6 @@ pub const UI = struct {
                     @panic("Fafiled to allocate memory!");
             },
             else => {},
-        }
-
-        if (self.current_window.ctx.frame.focused_id != null) {
-            sdlError(c.SDL_StartTextInput(self.current_window.ptr));
-        } else {
-            sdlError(c.SDL_StopTextInput(self.current_window.ptr));
         }
     }
 

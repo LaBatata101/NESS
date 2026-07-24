@@ -1,5 +1,4 @@
 const std = @import("std");
-
 const cpu = @import("cpu.zig");
 const rom = @import("rom.zig");
 pub const render = @import("render.zig");
@@ -8,6 +7,10 @@ pub const controller = @import("controller.zig");
 pub const ui = @import("ui/core/ui.zig");
 pub const gui = @import("ui/gui.zig");
 pub const logging = @import("logging.zig");
+pub const netplay_protocol = @import("netplay/protocol.zig");
+pub const netplay_snapshot = @import("netplay/snapshot.zig");
+pub const save_state = @import("save_state.zig");
+pub const netplay_session = @import("netplay/session.zig");
 
 pub const customPanic = @import("utils/panic.zig").customPanic;
 

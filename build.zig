@@ -159,7 +159,11 @@ const NessDeps = struct {
     spirv_cross_lib: *std.Build.Step.Compile,
 };
 
-fn createNessModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) !NessDeps {
+fn createNessModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) !NessDeps {
     const preferred_linkage: std.builtin.LinkMode = if (target.result.abi.isAndroid()) .dynamic else .static;
 
     const mod = b.createModule(.{
@@ -244,6 +248,20 @@ fn createNessModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const vk_headers = b.dependency("vulkan_headers", .{});
     mod.addIncludePath(vk_headers.path("include"));
 
+    const override = b.option([]const u8, "iroh-lib-dir", "Directory containing a prebuilt iroh-ffi static archive");
+    const iroh_dep = if (override) |lib_dir|
+        b.dependency("iroh", .{
+            .target = target,
+            .optimize = optimize,
+            .iroh_lib_dir = lib_dir,
+        })
+    else
+        b.dependency("iroh", .{
+            .target = target,
+            .optimize = optimize,
+        });
+    mod.addImport("iroh", iroh_dep.module("iroh"));
+
     mod.addAnonymousImport("pixeloid_font", .{ .root_source_file = b.path("resources/fonts/PixeloidSans.ttf") });
     mod.addAnonymousImport("nes_controller_img", .{ .root_source_file = b.path("resources/images/nes-controller.png") });
     mod.addAnonymousImport("app_icon", .{ .root_source_file = b.path("resources/icons/nes-icon-256x256.png") });
@@ -258,6 +276,7 @@ fn createNessModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     mod.addAnonymousImport("dpad_down_icon", .{ .root_source_file = b.path("resources/icons/dpad_down_32x32.png") });
     mod.addAnonymousImport("dpad_left_icon", .{ .root_source_file = b.path("resources/icons/dpad_left_32x32.png") });
     mod.addAnonymousImport("dpad_right_icon", .{ .root_source_file = b.path("resources/icons/dpad_right_32x32.png") });
+    mod.addAnonymousImport("copy_icon", .{ .root_source_file = b.path("resources/icons/copy_32x32.png") });
 
     try addBorderShaderImports(b, mod);
 

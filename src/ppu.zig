@@ -350,11 +350,11 @@ pub const PPU = struct {
         cycle: u16,
         scanline: u16,
         bg_data: BgData,
-        sprite_data: SpriteData,
+        sprite_data: *const SpriteData,
         nmi_interrupt: bool,
         nmi_interrupt_delay: bool,
         nmi_interrupt_cycle: u64,
-        frame_buffer: Frame,
+        frame_buffer: *const Frame,
         frame_complete: bool,
         global_cycle: u64,
         next_vblank_ppu_cycle: u64,
@@ -367,6 +367,11 @@ pub const PPU = struct {
         frame_is_odd: bool,
         skip_odd_frame_cycle: bool,
         current_frame_buffer_index: usize,
+
+        pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+            alloc.destroy(self.frame_buffer);
+            alloc.destroy(self.sprite_data);
+        }
     };
 
     pub fn init(rom: *Rom) Self {
@@ -444,7 +449,13 @@ pub const PPU = struct {
         self.last_cycle_written = 0;
     }
 
-    pub fn saveState(self: *const Self) Snapshot {
+    pub fn saveState(self: *const Self, alloc: std.mem.Allocator) !Snapshot {
+        const frame_buffer = try alloc.create(Frame);
+        const sprite_data = try alloc.create(SpriteData);
+
+        frame_buffer.* = self.frame_buffer;
+        sprite_data.* = self.sprite_data;
+
         return .{
             .palette_table = self.palette_table,
             .vram = self.vram,
@@ -463,11 +474,11 @@ pub const PPU = struct {
             .cycle = self.cycle,
             .scanline = self.scanline,
             .bg_data = self.bg_data,
-            .sprite_data = self.sprite_data,
+            .sprite_data = sprite_data,
             .nmi_interrupt = self.nmi_interrupt,
             .nmi_interrupt_delay = self.nmi_interrupt_delay,
             .nmi_interrupt_cycle = self.nmi_interrupt_cycle,
-            .frame_buffer = self.frame_buffer,
+            .frame_buffer = frame_buffer,
             .frame_complete = self.frame_complete,
             .global_cycle = self.global_cycle,
             .next_vblank_ppu_cycle = self.next_vblank_ppu_cycle,
@@ -501,11 +512,11 @@ pub const PPU = struct {
         self.cycle = snapshot.cycle;
         self.scanline = snapshot.scanline;
         self.bg_data = snapshot.bg_data;
-        self.sprite_data = snapshot.sprite_data;
+        self.sprite_data = snapshot.sprite_data.*;
         self.nmi_interrupt = snapshot.nmi_interrupt;
         self.nmi_interrupt_delay = snapshot.nmi_interrupt_delay;
         self.nmi_interrupt_cycle = snapshot.nmi_interrupt_cycle;
-        self.frame_buffer = snapshot.frame_buffer;
+        self.frame_buffer = snapshot.frame_buffer.*;
         self.frame_complete = snapshot.frame_complete;
         self.global_cycle = snapshot.global_cycle;
         self.next_vblank_ppu_cycle = snapshot.next_vblank_ppu_cycle;

@@ -30,6 +30,9 @@
         .android = .{
             .path = "third-party/zig-android-sdk",
         },
+        .iroh = .{
+            .path = "third-party/iroh-ffi",
+        },
     },
     .paths = .{
         "android",
@@ -41,6 +44,7 @@
         "third-party/SDL",
         "third-party/blip_buf-1.1.0",
         "third-party/clay",
+        "third-party/iroh-ffi",
         "third-party/zig-android-sdk",
     },
 }

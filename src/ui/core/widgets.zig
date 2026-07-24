@@ -30,8 +30,7 @@ pub const Container = struct {
         bg_color: ?Color = null,
         hover_bg_color: ?Color = null,
         corner_radius: f32 = 0,
-        border_width: u16 = 0,
-        border_color: ?Color = null,
+        border: clay.BorderElementConfig = .{},
         child_alignment: clay.ChildAlignment = .{ .x = .left, .y = .center },
         transition: clay.TransitionElementConfig = .{},
     };
@@ -58,10 +57,7 @@ pub const Container = struct {
             },
             .background_color = if (effective_bg) |color| color.toClay() else clay.Color{ 0, 0, 0, 0 },
             .corner_radius = .all(params.corner_radius),
-            .border = if (params.border_color) |border_color| .{
-                .color = border_color.toClay(),
-                .width = .outside(params.border_width),
-            } else .{ .color = .{ 0, 0, 0, 0 } },
+            .border = params.border,
             .transition = params.transition,
         });
 
@@ -256,8 +252,7 @@ pub const DraggablePanel = struct {
         clip_to: clay.FloatingClipToElement = .to_none,
         sizing: clay.Sizing = .fit,
         bg_color: ?Color = null,
-        border_color: ?Color = null,
-        border_width: u16 = 0,
+        border: clay.BorderElementConfig = .{},
         corner_radius: f32 = 0,
         grip_color: Color = Color.rgb(80, 90, 110),
     };
@@ -292,10 +287,7 @@ pub const DraggablePanel = struct {
             },
             .background_color = if (params.bg_color) |col| col.toClay() else .{ 0, 0, 0, 0 },
             .corner_radius = .all(params.corner_radius),
-            .border = if (params.border_color) |border_color| .{
-                .color = border_color.toClay(),
-                .width = .outside(params.border_width),
-            } else .{ .color = .{ 0, 0, 0, 0 } },
+            .border = params.border,
         });
 
         // Render the internal drag handle (grip strip + separator)
@@ -323,8 +315,17 @@ pub const DraggablePanel = struct {
             col2.end();
         }
         grip.end();
+        const has_border = params.border.width.left > 0 or
+            params.border.width.right > 0 or
+            params.border.width.top > 0 or
+            params.border.width.bottom > 0;
         _ = Separator.start(.{
-            .color = params.border_color orelse Color.rgb(35, 40, 50),
+            .color = if (has_border) .{
+                .r = @intFromFloat(params.border.color[0]),
+                .g = @intFromFloat(params.border.color[1]),
+                .b = @intFromFloat(params.border.color[2]),
+                .a = @intFromFloat(params.border.color[3]),
+            } else Color.rgb(35, 40, 50),
             .direction = .vertical,
             .thickness = 2,
         });
@@ -813,9 +814,7 @@ pub const Button = struct {
         font_size: u16 = 16,
         padding: clay.Padding = .all(8),
         corner_radius: f32 = 8,
-        border_width: u16 = 0,
-        elevation: u8 = 2,
-        border: ?clay.BorderElementConfig = null,
+        border: clay.BorderElementConfig = .{},
         sizing: clay.Sizing = .fit,
         text_alignment: clay.TextAlignment = .center,
         tooltip: ?Tooltip = null,
@@ -848,17 +847,7 @@ pub const Button = struct {
             },
             .background_color = button_color.toClay(),
             .corner_radius = .all(params.corner_radius),
-            .border = if (params.border) |border|
-                border
-            else if (params.border_width > 0 or params.elevation > 0) .{
-                .color = button_color.darken(0.3).toClay(),
-                .width = .{
-                    .bottom = if (is_hovered) params.elevation / 2 else params.elevation,
-                    .left = params.border_width,
-                    .right = params.border_width,
-                    .top = params.border_width,
-                },
-            } else .{ .color = .{ 0, 0, 0, 0 } },
+            .border = params.border,
         });
 
         if (params.icon) |icon| {
@@ -1107,13 +1096,13 @@ pub const TextField = struct {
         }
 
         const is_hovered = clay.hovered();
-        const is_focused = if (ctx.frame.focused_id) |fid| fid == element_id.id else false;
+        const is_focused = if (ctx.frame.focused_id) |fid| fid.id == element_id.id else false;
 
         ui.setMouseCursorText(is_hovered);
 
         var placeholder = params.placeholder;
         if (is_hovered and ctx.frame.mouse_pressed and !params.read_only) {
-            ctx.frame.focused_id = element_id.id;
+            ctx.frame.focused_id = element_id;
             placeholder = "";
         }
 
@@ -1198,6 +1187,7 @@ pub const TextField = struct {
                     .parentId = text_cursor.id,
                     .attach_points = .{ .element = .left_top, .parent = .left_top },
                     .offset = .{ .x = 2, .y = -30 },
+                    .z_index = std.math.maxInt(i16),
                 });
                 {
                     const paste_button = Button.start(.{
@@ -1207,7 +1197,6 @@ pub const TextField = struct {
                         .font_size = 13,
                         .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 },
                         .corner_radius = 4,
-                        .elevation = 0,
                     }, ctx);
                     paste_btn_hovered = clay.pointerOver(paste_button.id);
                     if (paste_button.clicked(ctx)) {
@@ -1524,8 +1513,7 @@ pub const MenuBar = struct {
             .direction = .row,
             .sizing = .{ .w = .grow, .h = .fit },
             .gap = 4,
-            .border_width = 1,
-            .border_color = params.border_color,
+            .border = .{ .width = .outside(1), .color = params.border_color.toClay() },
             .bg_color = params.bg_color,
             .child_alignment = .{ .y = .center },
         });
@@ -1853,10 +1841,9 @@ pub fn Combobox(comptime Option: type) type {
             id: ?[]const u8 = null,
             filtered_options: ?[]const Option = null,
             selected: ?Option = null,
-            border_color: Color = .black,
+            border: clay.BorderElementConfig = .{},
             border_color_on_open: Color = .black,
             border_color_on_hover: Color = .black,
-            border_width: clay.BorderWidth = .outside(1),
             bg_color: Color = .white,
             bg_color_on_hover: Color = .white,
             child_alignment: clay.ChildAlignment = .{ .y = .center },
@@ -1935,11 +1922,11 @@ pub fn Combobox(comptime Option: type) type {
                 else
                     params.bg_color;
                 const trigger_border = if (state.combobox.is_open)
-                    params.border_color_on_open
+                    params.border_color_on_open.toClay()
                 else if (is_hovered)
-                    params.border_color_on_hover
+                    params.border_color_on_hover.toClay()
                 else
-                    params.border_color;
+                    params.border.color;
                 clay.configureOpenElement(.{
                     .layout = .{
                         .padding = .{ .left = 10, .right = 8, .top = 6, .bottom = 6 },
@@ -1950,7 +1937,7 @@ pub fn Combobox(comptime Option: type) type {
                     },
                     .background_color = trigger_bg.toClay(),
                     .corner_radius = .all(4),
-                    .border = .{ .width = params.border_width, .color = trigger_border.toClay() },
+                    .border = .{ .width = params.border.width, .color = trigger_border },
                 });
 
                 _ = Label.start(.{

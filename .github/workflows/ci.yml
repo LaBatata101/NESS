@@ -13,6 +13,7 @@ permissions:
 
 env:
   ZIG_VERSION: 0.15.2
+  RUST_VERSION: 1.91.0
 
 jobs:
   test:
@@ -24,8 +25,13 @@ jobs:
         include:
           - name: Linux
             os: ubuntu-latest
+            target_arg: ""
           - name: Windows
             os: windows-latest
+            target_arg: -Dtarget=x86_64-windows-gnu
+#          - name: macOS
+#            os: macos-latest
+#            target_arg: ""
 
     steps:
       - name: Checkout
@@ -35,6 +41,19 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install Windows GNU Rust target
+        if: runner.os == 'Windows'
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: Install cargo-zigbuild
+        if: runner.os == 'Windows'
+        run: cargo install --locked cargo-zigbuild
 
       - name: Install Vulkan loader (Linux)
         if: runner.os == 'Linux'
@@ -47,4 +66,7 @@ jobs:
         run: brew install vulkan-loader
 
       - name: Run tests
-        run: zig build test
+        run: zig build test ${{ matrix.target_arg }} --release=fast --summary failures
+
+      - name: Build application
+        run: zig build ${{ matrix.target_arg }} --release=fast --summary failures

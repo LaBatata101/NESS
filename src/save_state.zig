@@ -1,7 +1,7 @@
 const std = @import("std");
 const zeit = @import("zeit");
 
-const utils = @import("utils/misc.zig");
+const utils = @import("utils/format.zig");
 const APU = @import("apu/apu.zig").APU;
 const Bus = @import("bus.zig").Bus;
 const CPU = @import("cpu.zig").CPU;
@@ -24,18 +24,6 @@ pub const SlotInfo = struct {
     display_time: [19]u8 = [_]u8{' '} ** 19,
 };
 
-const Snapshot = struct {
-    saved_at: i64,
-    cpu: CPU.Snapshot,
-    bus: Bus.Snapshot,
-    ppu: PPU.Snapshot,
-    apu: APU.Snapshot,
-
-    fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
-        self.bus.deinit(alloc);
-    }
-};
-
 pub fn saveSlot(alloc: std.mem.Allocator, rom_name: []const u8, system: *System, slot: usize) !SlotInfo {
     std.debug.assert(slot <= SLOT_COUNT);
 
@@ -48,22 +36,12 @@ pub fn saveSlot(alloc: std.mem.Allocator, rom_name: []const u8, system: *System,
     const file = try state_dir.createFile(slot_filename, .{});
     defer file.close();
 
-    const snapshot = try alloc.create(Snapshot);
-    errdefer alloc.destroy(snapshot);
+    var snapshot = try system.saveState(alloc);
+    defer snapshot.deinit(alloc);
 
-    snapshot.* = .{
-        .saved_at = (try zeit.instant(.{})).unixTimestamp(),
-        .cpu = system.cpu.saveState(),
-        .bus = try system.bus.saveState(alloc),
-        .ppu = system.ppu.saveState(),
-        .apu = system.apu.saveState(),
-    };
-    defer {
-        snapshot.deinit(alloc);
-        alloc.destroy(snapshot);
-    }
+    snapshot.saved_at = (try zeit.instant(.{})).unixTimestamp();
 
-    try writeSnapshot(alloc, file, snapshot);
+    try writeSnapshot(alloc, file, &snapshot);
     return .{ .display_time = utils.formatTimestamp(alloc, snapshot.saved_at) };
 }
 
@@ -79,10 +57,7 @@ pub fn loadSlot(alloc: std.mem.Allocator, rom_name: []const u8, system: *System,
         alloc.destroy(snapshot);
     }
 
-    try system.bus.loadState(&snapshot.bus);
-    system.ppu.loadState(&snapshot.ppu);
-    system.apu.loadState(&snapshot.apu);
-    system.cpu.loadState(snapshot.cpu);
+    try system.loadState(snapshot);
 }
 
 pub fn slotInfo(alloc: std.mem.Allocator, rom_name: []const u8, slot: usize) !SlotInfo {
@@ -94,7 +69,7 @@ pub fn slotInfo(alloc: std.mem.Allocator, rom_name: []const u8, slot: usize) !Sl
     return .{ .display_time = utils.formatTimestamp(alloc, try readHeaderTimestamp(file)) };
 }
 
-fn writeSnapshot(alloc: std.mem.Allocator, file: std.fs.File, snapshot: *const Snapshot) !void {
+fn writeSnapshot(alloc: std.mem.Allocator, file: std.fs.File, snapshot: *const System.Snapshot) !void {
     var file_buffer: [4096]u8 = undefined;
     var file_writer = file.writer(&file_buffer);
     const writer = &file_writer.interface;
@@ -120,7 +95,7 @@ fn writeSnapshot(alloc: std.mem.Allocator, file: std.fs.File, snapshot: *const S
     try writer.flush();
 }
 
-fn readSnapshot(alloc: std.mem.Allocator, file: std.fs.File) !*Snapshot {
+fn readSnapshot(alloc: std.mem.Allocator, file: std.fs.File) !*System.Snapshot {
     var file_buffer: [4096]u8 = undefined;
     var file_reader = file.reader(&file_buffer);
     const reader = &file_reader.interface;
@@ -131,7 +106,7 @@ fn readSnapshot(alloc: std.mem.Allocator, file: std.fs.File) !*Snapshot {
 
     var body_reader: std.Io.Reader = .fixed(body);
 
-    const snapshot = try alloc.create(Snapshot);
+    const snapshot = try alloc.create(System.Snapshot);
     errdefer alloc.destroy(snapshot);
 
     snapshot.saved_at = header.saved_at;
@@ -351,16 +326,17 @@ fn compressBytes(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
 
 fn decompressBytes(alloc: std.mem.Allocator, compressed: []const u8, expected_len: usize) ![]u8 {
     var reader: std.Io.Reader = .fixed(compressed);
-    var writer: std.Io.Writer.Allocating = .init(alloc);
-    errdefer writer.deinit();
+    const output = try alloc.alloc(u8, expected_len);
+    errdefer alloc.free(output);
+    var writer: std.Io.Writer = .fixed(output);
 
     var decompressor: std.compress.flate.Decompress = .init(&reader, .gzip, &.{});
-    _ = decompressor.reader.streamRemaining(&writer.writer) catch |err| switch (err) {
+    _ = decompressor.reader.streamRemaining(&writer) catch |err| switch (err) {
         error.ReadFailed, error.WriteFailed => return error.InvalidCompressedSaveState,
     };
-    if (writer.written().len != expected_len) return error.InvalidCompressedSaveState;
+    if (writer.end != expected_len) return error.InvalidCompressedSaveState;
 
-    return try writer.toOwnedSlice();
+    return output;
 }
 
 fn openStateDir(alloc: std.mem.Allocator, rom_name: []const u8) !std.fs.Dir {

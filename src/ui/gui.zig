@@ -17,10 +17,11 @@ const pipeline = @import("../shaders/pipeline.zig");
 const shader_download = @import("../shader_download.zig");
 const bindings = @import("bindings.zig");
 const settings = @import("settings.zig");
-const utils = @import("../utils/misc.zig");
+const utils = @import("../utils/format.zig");
 const save_state = @import("../save_state.zig");
 const state = @import("state.zig");
 const ness = @import("../root.zig");
+const sdlError = ness.sdlError;
 const NES_WIDTH = ness.NES_WIDTH;
 const NES_HEIGHT = ness.NES_HEIGHT;
 const OVERSCAN_TOP = ness.OVERSCAN_TOP;
@@ -149,16 +150,26 @@ pub fn drawGUI(ui: *UI, app_state: *AppState) void {
             }
         }
 
+        if (builtin.abi.isAndroid() and app_state.show_android_multiplayer_ui) {
+            drawAndroidSessionUI(ui, app_state, root.id, safe_area_padding);
+        }
+
         if (ui.hasTimerExpired("save_state_toast").is_some_and(check_timer_result)) toast(ui, .{ .text = "State saved" });
         if (ui.hasTimerExpired("load_state_toast").is_some_and(check_timer_result)) toast(ui, .{ .text = "State loaded" });
+        if (ui.hasTimerExpired("gamepad_connected_toast").is_some_and(check_timer_result)) {
+            toast(ui, .{ .text = "Gamepad connected", .icon = .controller });
+        }
+        if (ui.hasTimerExpired("gamepad_disconnected_toast").is_some_and(check_timer_result)) {
+            toast(ui, .{ .text = "Gamepad disconnected", .icon = .controller });
+        }
+        if (ui.hasTimerExpired("connected_to_host_toast").is_some_and(check_timer_result)) {
+            toast(ui, .{ .text = "Connected to host" });
+        }
+        if (ui.hasTimerExpired("client_disconnected_toast").is_some_and(check_timer_result)) {
+            toast(ui, .{ .text = "Client disconnected" });
+        }
 
         if (builtin.abi.isAndroid()) {
-            if (ui.hasTimerExpired("gamepad_connected_toast").is_some_and(check_timer_result)) {
-                toast(ui, .{ .text = "Gamepad connected", .icon = .controller });
-            }
-            if (ui.hasTimerExpired("gamepad_disconnected_toast").is_some_and(check_timer_result)) {
-                toast(ui, .{ .text = "Gamepad disconnected", .icon = .controller });
-            }
             if (app_state.show_android_sidepanel) drawAndroidSidepanel(ui, app_state, root.id);
         }
     }
@@ -175,11 +186,18 @@ fn toastTransition(state_: clay.TransitionData, _: clay.TransitionProperty) call
     return s;
 }
 
-fn toast(ui: *UI, params: struct { text: []const u8, icon: ?UI.Icon = null }) void {
-    const attach_point: clay.FloatingAttachPointType = if (builtin.abi.isAndroid()) .center_bottom else .left_bottom;
+fn toast(ui: *UI, params: struct {
+    text: []const u8,
+    icon: ?UI.Icon = null,
+    style: struct {
+        font_size: u16 = 25,
+        bg_color: Color = Color.black.withAlpha(0.8),
+    } = .{},
+    attach_point: clay.FloatingAttachPointType = if (builtin.abi.isAndroid()) .center_bottom else .left_bottom,
+}) void {
     const f = ui.float(.{
         .attach_to = .to_root,
-        .attach_points = .{ .parent = attach_point, .element = attach_point },
+        .attach_points = .{ .parent = params.attach_point, .element = params.attach_point },
         .z_index = std.math.maxInt(i16),
         .sizing = .fit,
         .offset = .{ .x = 15, .y = -15 },
@@ -199,14 +217,14 @@ fn toast(ui: *UI, params: struct { text: []const u8, icon: ?UI.Icon = null }) vo
     });
     {
         const row = ui.row(.{
-            .bg_color = Color.black.withAlpha(0.8),
+            .bg_color = params.style.bg_color,
             .child_alignment = .center,
             .gap = 10,
         });
         if (params.icon) |icon| {
             _ = ui.icon(.{ .icon = ui.icons.get(icon) });
         }
-        _ = ui.label(.{ .text = params.text, .font_size = 25, .color = .white });
+        _ = ui.label(.{ .text = params.text, .font_size = params.style.font_size, .color = .white });
         row.end();
     }
     f.end();
@@ -228,6 +246,7 @@ fn drawDesktopMenu(ui: *UI, app_state: *AppState) void {
         });
         if (ui.menuItem(.{
             .label = "Open",
+            .enabled = !app_state.isConnectedClient(),
             .bg_color = theme.bg_section,
             .hover_color = theme.accent_blue,
             .text_color = theme.text_secondary,
@@ -255,7 +274,7 @@ fn drawDesktopMenu(ui: *UI, app_state: *AppState) void {
         });
         if (ui.menuItem(.{
             .label = if (app_state.paused) "Continue" else "Pause",
-            .enabled = app_state.emulation_running,
+            .enabled = app_state.emulation_running and !app_state.isConnectedClient(),
             .bg_color = theme.bg_section,
             .hover_color = theme.accent_blue,
             .text_color = theme.text_secondary,
@@ -265,7 +284,7 @@ fn drawDesktopMenu(ui: *UI, app_state: *AppState) void {
         }
         if (ui.menuItem(.{
             .label = "Stop",
-            .enabled = app_state.emulation_running,
+            .enabled = app_state.emulation_running and !app_state.isConnectedClient(),
             .bg_color = theme.bg_section,
             .hover_color = theme.accent_blue,
             .text_color = theme.text_secondary,
@@ -275,7 +294,7 @@ fn drawDesktopMenu(ui: *UI, app_state: *AppState) void {
         }
         if (ui.menuItem(.{
             .label = "Restart",
-            .enabled = app_state.emulation_running,
+            .enabled = app_state.emulation_running and !app_state.isConnectedClient(),
             .bg_color = theme.bg_section,
             .hover_color = theme.accent_blue,
             .text_color = theme.text_secondary,
@@ -287,7 +306,7 @@ fn drawDesktopMenu(ui: *UI, app_state: *AppState) void {
         _ = ui.separator(.{ .color = theme.border, .thickness = 2 });
         const save_state_item = ui.menuItem(.{
             .label = "Save State",
-            .enabled = app_state.emulation_running,
+            .enabled = app_state.emulation_running and !app_state.isConnectedClient(),
             .bg_color = theme.bg_section,
             .hover_color = theme.accent_blue,
             .text_color = theme.text_secondary,
@@ -304,7 +323,7 @@ fn drawDesktopMenu(ui: *UI, app_state: *AppState) void {
                 {
                     if (ui.menuItem(.{
                         .label = "Quick Save",
-                        .enabled = app_state.emulation_running,
+                        .enabled = app_state.emulation_running and !app_state.isConnectedClient(),
                         .bg_color = theme.bg_section,
                         .hover_color = theme.accent_blue,
                         .text_color = theme.text_secondary,
@@ -322,7 +341,7 @@ fn drawDesktopMenu(ui: *UI, app_state: *AppState) void {
 
         const load_state_item = ui.menuItem(.{
             .label = "Load State",
-            .enabled = app_state.emulation_running,
+            .enabled = app_state.emulation_running and !app_state.isConnectedClient(),
             .bg_color = theme.bg_section,
             .hover_color = theme.accent_blue,
             .text_color = theme.text_secondary,
@@ -339,7 +358,7 @@ fn drawDesktopMenu(ui: *UI, app_state: *AppState) void {
                 {
                     if (ui.menuItem(.{
                         .label = "Quick Load",
-                        .enabled = app_state.emulation_running,
+                        .enabled = app_state.emulation_running and !app_state.isConnectedClient(),
                         .bg_color = theme.bg_section,
                         .hover_color = theme.accent_blue,
                         .text_color = theme.text_secondary,
@@ -358,7 +377,7 @@ fn drawDesktopMenu(ui: *UI, app_state: *AppState) void {
         _ = ui.separator(.{ .color = theme.border, .thickness = 2 });
         if (ui.menuItem(.{
             .label = "Debug",
-            .enabled = app_state.emulation_running,
+            .enabled = app_state.emulation_running and !app_state.sessionActive(),
             .bg_color = theme.bg_section,
             .hover_color = theme.accent_blue,
             .text_color = theme.text_secondary,
@@ -382,16 +401,404 @@ fn drawDesktopMenu(ui: *UI, app_state: *AppState) void {
             .hover_color = theme.accent_blue,
             .text_color = theme.text_secondary,
         }).clicked(ui.main_window.ctx)) {
-            ui.createWindow(
+            _ = ui.createWindow(
                 "Settings",
                 680,
                 640,
-                .{ .draw_fn = drawSettingsWindowUI, .draw_fn_data = @ptrCast(app_state) },
+                .{ .draw_fn = drawSettingsWindowUI, .user_data = @ptrCast(app_state) },
             );
         }
         emulation_menu.end();
+
+        const multiplayer_menu = ui.dropdownMenu(.{
+            .label = "Multiplayer",
+            .bg_color = theme.bg_panel,
+            .hover_color = theme.bg_hover,
+            .text_color = theme.text_secondary,
+            .list_bg_color = theme.bg_section,
+            .list_border_color = theme.border,
+        });
+        if (app_state.sessionActive()) {
+            if (ui.menuItem(.{
+                .label = "Session Details…",
+                .bg_color = theme.bg_section,
+                .hover_color = theme.accent_blue,
+                .text_color = theme.text_secondary,
+            }).clicked(ui.main_window.ctx)) openSessionWindow(ui, app_state, "Session Details");
+        } else {
+            if (ui.menuItem(.{
+                .label = "Connect to Session…",
+                .bg_color = theme.bg_section,
+                .hover_color = theme.accent_blue,
+                .text_color = theme.text_secondary,
+            }).clicked(ui.main_window.ctx)) openSessionWindow(ui, app_state, "Connect to Session");
+            if (ui.menuItem(.{
+                .label = "Host Session…",
+                .enabled = app_state.emulation_running,
+                .bg_color = theme.bg_section,
+                .hover_color = theme.accent_blue,
+                .text_color = theme.text_secondary,
+            }).clicked(ui.main_window.ctx)) {
+                app_state.startHostSession() catch |err| std.log.err("failed to host session: {s}", .{@errorName(err)});
+                openSessionWindow(ui, app_state, "Host Session");
+            }
+        }
+        multiplayer_menu.end();
     }
     menubar.end();
+}
+
+fn openSessionWindow(ui: *UI, app_state: *AppState, title: []const u8) void {
+    const session_state = app_state.sessionState();
+    const height: i32 = if (session_state == .connected or session_state == .resyncing) 400 else 220;
+    app_state.netplay.session_window_handle = ui.createWindow(
+        title,
+        600,
+        height,
+        .{
+            .user_data = @ptrCast(app_state),
+            .draw_fn = drawSessionWindowUI,
+            .on_close = onSessionWindowClosed,
+        },
+    );
+}
+
+fn onSessionWindowClosed(_: *UI, user_data: ?*anyopaque) void {
+    const app_state: *AppState = @ptrCast(@alignCast(user_data.?));
+    app_state.handleSessionWindowClosed();
+}
+
+fn drawSessionWindowUI(ui: *UI, user_data: ?*anyopaque) void {
+    const app_state: *AppState = @ptrCast(@alignCast(user_data.?));
+    drawSessionUI(ui, app_state, false);
+}
+
+fn drawAndroidSessionUI(ui: *UI, app_state: *AppState, root_id: clay.ElementId, safe_area_padding: clay.Padding) void {
+    const scrim_padding = clay.Padding{
+        .left = safe_area_padding.left + 14,
+        .right = safe_area_padding.right + 14,
+        .top = safe_area_padding.top + 18,
+        .bottom = safe_area_padding.bottom + 18,
+    };
+    const available_w = @max(
+        1.0,
+        ui.main_window.logical_width - @as(f32, @floatFromInt(scrim_padding.left + scrim_padding.right)),
+    );
+    const available_h = @max(
+        1.0,
+        ui.main_window.logical_height - @as(f32, @floatFromInt(scrim_padding.top + scrim_padding.bottom)),
+    );
+    const max_panel_w = @min(560.0, available_w);
+    const max_panel_h = @min(620.0, available_h);
+    const max_body_h = @max(1.0, max_panel_h - 56.0);
+
+    const overlay = ui.float(.{
+        .attach_to = .to_element_with_id,
+        .parentId = root_id.id,
+        .attach_points = .{ .parent = .left_top, .element = .left_top },
+        .z_index = 90,
+        .sizing = .grow,
+    });
+    {
+        const scrim = ui.column(.{
+            .sizing = .grow,
+            .bg_color = Color.black.withAlpha(0.72),
+            .padding = scrim_padding,
+            .child_alignment = .center,
+        });
+        {
+            const panel = ui.column(.{
+                .sizing = .{
+                    .w = .growMinMax(.{ .max = max_panel_w }),
+                    .h = .fitMinMax(.{ .max = max_panel_h }),
+                },
+                .bg_color = theme.bg_section,
+                .border = .{ .width = .outside(1), .color = theme.border.toClay() },
+                .corner_radius = 4,
+                .padding = .all(12),
+                .gap = 10,
+                .child_alignment = .{ .x = .left, .y = .top },
+            });
+            {
+                const header = ui.row(.{
+                    .sizing = .{ .w = .grow, .h = .fit },
+                    .gap = 8,
+                    .child_alignment = .{ .y = .center },
+                });
+                {
+                    _ = ui.label(.{
+                        .text = androidSessionTitle(app_state),
+                        .font_size = 18,
+                        .color = theme.text_primary,
+                    });
+                    _ = ui.spacer(.{ .sizing = .grow });
+                    if (ui.button(.{
+                        .text = "Close",
+                        .font_size = 15,
+                        .text_color = theme.text_primary,
+                        .bg_color = theme.bg_hover,
+                        .hover_color = theme.border,
+                        .padding = .{ .left = 10, .right = 10, .top = 6, .bottom = 6 },
+                        .corner_radius = 3,
+                    }).clicked(ui.main_window.ctx)) {
+                        app_state.closeAndroidSessionUI();
+                    }
+                }
+                header.end();
+
+                const scroll = ui.scrollArea(.{
+                    .id = "android_multiplayer_scroll",
+                    .sizing = .{ .w = .grow, .h = .fitMinMax(.{ .max = max_body_h }) },
+                    .padding = .{ .right = 4 },
+                });
+                {
+                    drawSessionUI(ui, app_state, true);
+                }
+                scroll.end();
+            }
+            panel.end();
+        }
+        scrim.end();
+    }
+    overlay.end();
+}
+
+fn androidSessionTitle(app_state: *AppState) []const u8 {
+    return switch (app_state.sessionRole()) {
+        .host => switch (app_state.sessionState()) {
+            .connected, .resyncing, .disconnecting => "Session Details",
+            else => "Host Session",
+        },
+        .client => switch (app_state.sessionState()) {
+            .preview => "Join Session",
+            .connected, .resyncing, .disconnecting => "Session Details",
+            else => "Connect to Session",
+        },
+        .none => "Connect to Session",
+    };
+}
+
+fn drawSessionUI(ui: *UI, app_state: *AppState, is_android: bool) void {
+    const session_state = app_state.sessionState();
+    const root = ui.column(.{
+        .sizing = if (is_android) .{ .w = .grow, .h = .fit } else .grow,
+        .bg_color = if (is_android) null else theme.bg_base,
+        .padding = .all(if (is_android) 0 else 24),
+        .gap = 14,
+        .child_alignment = .{ .x = .left, .y = .center },
+    });
+    {
+        _ = ui.label(.{ .text = sessionStateLabel(session_state), .font_size = 15, .color = theme.text_secondary });
+        if (app_state.netplay.session_error) |message| {
+            _ = ui.label(.{ .text = message, .font_size = 14, .color = theme.accent_red });
+        }
+
+        if (app_state.sessionRole() == .host) {
+            drawHostSessionWindow(ui, app_state);
+            drawSessionConnectionDetails(ui, app_state);
+            if (session_state != .disconnecting) {
+                const label = if (session_state == .waiting or session_state == .creating) "Cancel Hosting" else "Disconnect";
+                drawSessionLeaveAction(ui, app_state, label);
+            }
+        } else if (session_state == .preview and app_state.netplay.session_preview_name != null and
+            app_state.netplay.session_preview_frame != null)
+        {
+            drawClientPreview(ui, app_state, is_android);
+        } else if (app_state.sessionRole() == .client and session_state != .idle and session_state != .failed) {
+            drawSessionConnectionDetails(ui, app_state);
+            if (session_state != .disconnecting) {
+                const label = if (session_state == .connected or session_state == .resyncing) "Disconnect" else "Cancel Connection";
+                drawSessionLeaveAction(ui, app_state, label);
+            }
+        } else {
+            const code_scroll = ui.scrollArea(.{
+                .id = "multiplayer_session_code_scroll",
+                .sizing = .{ .w = .grow, .h = .fit },
+                .vertical = false,
+                .horizontal = true,
+            });
+            const session_code_field = ui.textField(.{
+                .id = "multiplayer_session_code",
+                .placeholder = "neskwik:…",
+                .padding_val = .all(12),
+            });
+            code_scroll.end();
+
+            if (ui.button(.{
+                .text = "Connect",
+                .bg_color = if (session_code_field.value().len != 0) theme.accent_blue else theme.bg_hover,
+                .hover_color = theme.accent_blue.lighten(0.12),
+                .text_color = Color.white,
+                .enabled = session_code_field.value().len != 0,
+            }).clicked(ui.current_window.ctx)) {
+                if (app_state.connectSession(session_code_field.value())) {
+                    if (!builtin.abi.isAndroid()) app_state.netplay.session_window_handle.?.setWindowSize(600, 550);
+                } else |err| {
+                    app_state.setSessionError(std.fmt.allocPrint(
+                        ui.current_window.ctx.frameAlloc(),
+                        "Failed to connect: {s}",
+                        .{@errorName(err)},
+                    ) catch @panic("OOM"));
+                    std.log.err("failed to connect: {s}", .{@errorName(err)});
+                }
+            }
+        }
+    }
+    root.end();
+}
+
+fn drawHostSessionWindow(ui: *UI, app_state: *AppState) void {
+    if (app_state.netplay.session_preview_name) |name| {
+        _ = ui.label(.{ .text = name, .font_size = 15, .color = theme.text_value });
+    }
+
+    if (app_state.netplay.session_code) |code| {
+        const code_row = ui.row(.{ .sizing = .{ .w = .grow, .h = .fit }, .gap = 8 });
+        {
+            const code_scroll = ui.scrollArea(.{
+                .id = "multiplayer_host_code_scroll",
+                .sizing = .{ .w = .grow, .h = .fit },
+                .vertical = false,
+                .horizontal = true,
+            });
+            {
+                _ = ui.textField(.{
+                    .id = "multiplayer_host_code",
+                    .value = code,
+                    .read_only = true,
+                    .width = .fit,
+                });
+            }
+            code_scroll.end();
+            if (ui.iconButton(.{
+                .icon = ui.icons.get(.copy),
+                .size = 24,
+                .padding = .all(10),
+                .bg_color = theme.bg_hover,
+                .hover_color = theme.accent_blue,
+                .overlay_color = theme.text_primary,
+            }).clicked(ui.current_window.ctx)) {
+                ui.setClipboardText(code) catch {};
+                ui.setTimer("session_code_copied", 1400);
+            }
+        }
+        code_row.end();
+
+        if (!builtin.abi.isAndroid() and !ui.hasTimerExpired("session_code_copied").unwrap_or(true)) {
+            toast(
+                ui,
+                .{
+                    .text = "Code copied!",
+                    .style = .{ .font_size = 18, .bg_color = .black },
+                    .attach_point = .center_bottom,
+                },
+            );
+        }
+    }
+}
+
+fn drawSessionConnectionDetails(ui: *UI, app_state: *AppState) void {
+    const frame_alloc = ui.current_window.ctx.frameAlloc();
+
+    if (app_state.netplay.session_peer) |peer| {
+        const peer_text = std.fmt.allocPrint(frame_alloc, "Peer: {x}", .{peer[0..8]}) catch "Peer connected";
+        _ = ui.label(.{ .text = peer_text, .font_size = 13, .color = theme.text_secondary });
+    }
+
+    const stats = app_state.netplay.connection_stats orelse return;
+    const ping = if (stats.has_selected_path)
+        std.fmt.allocPrint(frame_alloc, "Ping: {d} ms", .{stats.rtt_ms}) catch "Ping: unavailable"
+    else
+        "Ping: unavailable";
+    const route = switch (stats.route) {
+        .direct => "Route: Direct",
+        .relay => "Route: Relay",
+        .custom => "Route: Custom",
+        .unknown => "Route: Unknown",
+    };
+    const traffic = std.fmt.allocPrint(
+        frame_alloc,
+        "Traffic: {s} sent / {s} received",
+        .{ utils.formatByteCount(frame_alloc, stats.udp_tx_bytes), utils.formatByteCount(frame_alloc, stats.udp_rx_bytes) },
+    ) catch "Traffic: unavailable";
+    const packet_loss = std.fmt.allocPrint(
+        frame_alloc,
+        "Packet loss: {d} packets ({s})",
+        .{ stats.lost_packets, utils.formatByteCount(frame_alloc, stats.lost_bytes) },
+    ) catch "Packet loss: unavailable";
+
+    _ = ui.label(.{ .text = ping, .font_size = 13, .color = theme.text_secondary });
+    _ = ui.label(.{ .text = route, .font_size = 13, .color = theme.text_secondary });
+    _ = ui.label(.{ .text = traffic, .font_size = 13, .color = theme.text_secondary });
+    _ = ui.label(.{ .text = packet_loss, .font_size = 13, .color = theme.text_secondary });
+}
+
+fn drawClientPreview(ui: *UI, app_state: *AppState, is_android: bool) void {
+    _ = ui.label(.{ .text = app_state.netplay.session_preview_name.?, .font_size = 18, .color = theme.text_primary });
+    const size_text = std.fmt.allocPrint(
+        ui.current_window.ctx.frameAlloc(),
+        "{d:.2} MiB",
+        .{@as(f64, @floatFromInt(app_state.netplay.session_preview_size)) / (1024.0 * 1024.0)},
+    ) catch "";
+
+    _ = ui.label(.{ .text = size_text, .font_size = 13, .color = theme.text_secondary });
+    _ = ui.canvas(.{
+        .id = "multiplayer_preview",
+        .pixel_format = c.SDL_PIXELFORMAT_ABGR8888,
+        .pixels = app_state.netplay.session_preview_frame.?,
+        .w = NES_WIDTH,
+        .h = NES_HEIGHT,
+        .sizing = .{
+            .w = .grow,
+            .h = .fixed(if (is_android)
+                @min(360, @max(180, ui.main_window.logical_height * 0.45))
+            else
+                360),
+        },
+        .aspect_ratio = .@"4_3",
+        .bg_color = Color.black,
+    });
+
+    const actions = ui.row(.{ .sizing = .{ .w = .grow, .h = .fit }, .gap = 10 });
+    {
+        if (ui.button(.{
+            .text = "Join",
+            .bg_color = theme.accent_green,
+            .hover_color = theme.accent_green.lighten(0.1),
+            .text_color = Color.white,
+        }).clicked(ui.current_window.ctx)) app_state.joinSession() catch {};
+        if (ui.button(.{
+            .text = "Cancel",
+            .bg_color = theme.bg_hover,
+            .hover_color = theme.border,
+            .text_color = theme.text_primary,
+        }).clicked(ui.current_window.ctx)) app_state.leaveSession();
+    }
+    actions.end();
+}
+
+fn drawSessionLeaveAction(ui: *UI, app_state: *AppState, label: []const u8) void {
+    if (ui.button(.{
+        .text = label,
+        .bg_color = theme.accent_red,
+        .hover_color = theme.accent_red.lighten(0.1),
+        .text_color = Color.white,
+    }).clicked(ui.current_window.ctx)) app_state.leaveSession();
+}
+
+fn sessionStateLabel(value: ness.netplay_session.State) []const u8 {
+    return switch (value) {
+        .idle => "Enter the session code to join a session.",
+        .creating => "Creating a secure endpoint…",
+        .waiting => "Waiting for a guest…",
+        .connecting => "Connecting…",
+        .preview => "Review the host game before joining.",
+        .joining => "Transferring and loading game state…",
+        .connected => "Connected",
+        .resyncing => "Resynchronizing…",
+        .disconnecting => "Disconnecting…",
+        .failed => "Connection failed",
+    };
 }
 
 fn drawAndroidHeader(ui: *UI, app_state: *AppState) void {
@@ -399,8 +806,7 @@ fn drawAndroidHeader(ui: *UI, app_state: *AppState) void {
 
     const header = ui.column(.{
         .bg_color = theme.bg_panel,
-        .border_width = 1,
-        .border_color = theme.border_dim,
+        .border = .{ .width = .outside(1), .color = theme.border_dim.toClay() },
         .sizing = .{ .h = .fit, .w = .grow },
     });
     {
@@ -435,7 +841,10 @@ fn drawAndroidHeader(ui: *UI, app_state: *AppState) void {
 
             _ = ui.spacer(.{ .sizing = .{ .w = .grow } });
 
-            if (!app_state.show_android_settings_ui) {
+            if (!app_state.show_android_settings_ui and
+                !app_state.show_android_multiplayer_ui and
+                !app_state.isConnectedClient())
+            {
                 if (ui.button(.{
                     .text = "Open ROM",
                     .font_size = 14,
@@ -444,7 +853,6 @@ fn drawAndroidHeader(ui: *UI, app_state: *AppState) void {
                     .hover_color = theme.accent_blue.lighten(0.12),
                     .padding = .{ .left = 14, .right = 14, .top = 9, .bottom = 9 },
                     .corner_radius = 6,
-                    .elevation = 0,
                 }).clicked(ui.main_window.ctx)) {
                     openRomDialog(ui, app_state);
                 }
@@ -495,8 +903,7 @@ fn drawAndroidSidepanel(ui: *UI, app_state: *AppState, root_id: clay.ElementId) 
         const col = ui.column(.{
             .sizing = .{ .w = .fixed(sidepanel_w), .h = .grow },
             .bg_color = theme.bg_panel,
-            .border_width = 1,
-            .border_color = theme.border,
+            .border = .{ .width = .outside(1), .color = theme.border.toClay() },
             .child_alignment = .{ .x = .left, .y = .top },
             .padding = .{
                 .top = safe_padding.top,
@@ -512,8 +919,9 @@ fn drawAndroidSidepanel(ui: *UI, app_state: *AppState, root_id: clay.ElementId) 
             });
             {
                 drawAndroidDrawerSectionLabel(ui, "Home");
-                if (drawAndroidDrawerAction(ui, "Home", true).clicked(ui.main_window.ctx)) {
+                if (drawAndroidDrawerAction(ui, "Home", !app_state.isConnectedClient()).clicked(ui.main_window.ctx)) {
                     app_state.show_android_settings_ui = false;
+                    app_state.show_android_multiplayer_ui = false;
                     app_state.render_home_ui = true;
                     app_state.show_android_sidepanel = false;
 
@@ -522,7 +930,7 @@ fn drawAndroidSidepanel(ui: *UI, app_state: *AppState, root_id: clay.ElementId) 
                         app_state.unloadCurrentRom();
                     }
                 }
-                if (drawAndroidDrawerAction(ui, "Open ROM", true).clicked(ui.main_window.ctx)) {
+                if (drawAndroidDrawerAction(ui, "Open ROM", !app_state.isConnectedClient()).clicked(ui.main_window.ctx)) {
                     app_state.show_android_sidepanel = false;
                     openRomDialog(ui, app_state);
                 }
@@ -531,28 +939,28 @@ fn drawAndroidSidepanel(ui: *UI, app_state: *AppState, root_id: clay.ElementId) 
                 if (drawAndroidDrawerAction(
                     ui,
                     if (app_state.paused) "Resume" else "Pause",
-                    app_state.emulation_running,
+                    app_state.emulation_running and !app_state.isConnectedClient(),
                 ).clicked(ui.main_window.ctx)) {
                     app_state.togglePause();
                     app_state.show_android_sidepanel = false;
                 }
-                if (drawAndroidDrawerAction(ui, "Restart", app_state.emulation_running).clicked(ui.main_window.ctx)) {
+                if (drawAndroidDrawerAction(ui, "Restart", app_state.emulation_running and !app_state.isConnectedClient()).clicked(ui.main_window.ctx)) {
                     app_state.resetSystem();
                     app_state.show_android_sidepanel = false;
                 }
-                if (drawAndroidDrawerAction(ui, "Stop", app_state.emulation_running).clicked(ui.main_window.ctx)) {
+                if (drawAndroidDrawerAction(ui, "Stop", app_state.emulation_running and !app_state.isConnectedClient()).clicked(ui.main_window.ctx)) {
                     app_state.unloadCurrentRom();
                     ui.setWindowFullscreen(false);
                 }
 
                 drawAndroidDrawerSectionLabel(ui, "State");
-                const save_state_btn = drawAndroidDrawerAction(ui, "Save State", app_state.emulation_running);
+                const save_state_btn = drawAndroidDrawerAction(ui, "Save State", app_state.emulation_running and !app_state.isConnectedClient());
                 if (save_state_btn.clicked(ui.main_window.ctx)) {
                     ui.setTimer("android_state_dialog", 250);
                     app_state.show_android_save_state_dialog = true;
                 }
 
-                const load_state_btn = drawAndroidDrawerAction(ui, "Load State", app_state.emulation_running);
+                const load_state_btn = drawAndroidDrawerAction(ui, "Load State", app_state.emulation_running and !app_state.isConnectedClient());
                 if (load_state_btn.clicked(ui.main_window.ctx)) {
                     // Set a timer of 250ms to avoid closing the sidepanel as soon as it's opened
                     ui.setTimer("android_state_dialog", 250);
@@ -563,6 +971,21 @@ fn drawAndroidSidepanel(ui: *UI, app_state: *AppState, root_id: clay.ElementId) 
                     pointer_over_state_dialog = drawAndroidStateDialog(ui, app_state, save_state_btn.id, .save);
                 } else if (app_state.show_android_load_state_dialog) {
                     pointer_over_state_dialog = drawAndroidStateDialog(ui, app_state, load_state_btn.id, .load);
+                }
+
+                drawAndroidDrawerSectionLabel(ui, "Multiplayer");
+                if (app_state.sessionActive()) {
+                    if (drawAndroidDrawerAction(ui, "Session Details", true).clicked(ui.main_window.ctx)) {
+                        openAndroidSessionUI(ui, app_state);
+                    }
+                } else {
+                    if (drawAndroidDrawerAction(ui, "Connect to Session", true).clicked(ui.main_window.ctx)) {
+                        openAndroidSessionUI(ui, app_state);
+                    }
+                    if (drawAndroidDrawerAction(ui, "Host Session", app_state.emulation_running).clicked(ui.main_window.ctx)) {
+                        app_state.startHostSession() catch |err| std.log.err("failed to host session: {s}", .{@errorName(err)});
+                        openAndroidSessionUI(ui, app_state);
+                    }
                 }
 
                 drawAndroidDrawerSectionLabel(ui, "Tools");
@@ -582,7 +1005,7 @@ fn drawAndroidSidepanel(ui: *UI, app_state: *AppState, root_id: clay.ElementId) 
                         "Speed: {s}",
                         .{app_state.settings.emulation_speed.label()},
                     ) catch @panic("OOM"),
-                    true,
+                    !app_state.isConnectedClient(),
                 ).clicked(ui.main_window.ctx)) {
                     app_state.setEmulationSpeed(nextEmulationSpeed(app_state.settings.emulation_speed));
                 }
@@ -613,6 +1036,14 @@ fn drawAndroidSidepanel(ui: *UI, app_state: *AppState, root_id: clay.ElementId) 
     }
 }
 
+fn openAndroidSessionUI(ui: *UI, app_state: *AppState) void {
+    app_state.show_android_multiplayer_ui = true;
+    app_state.show_android_settings_ui = false;
+    app_state.show_android_sidepanel = false;
+    app_state.render_home_ui = !app_state.emulation_running;
+    ui.setWindowFullscreen(false);
+}
+
 fn drawAndroidStateDialog(ui: *UI, app_state: *AppState, parent_id: clay.ElementId, mode: SaveStateMenuMode) bool {
     const is_open = app_state.show_android_save_state_dialog or app_state.show_android_load_state_dialog;
     const safe_padding = ui.main_window.safeAreaPadding();
@@ -636,8 +1067,7 @@ fn drawAndroidStateDialog(ui: *UI, app_state: *AppState, parent_id: clay.Element
     {
         const panel = ui.column(.{
             .bg_color = theme.bg_section,
-            .border_width = 1,
-            .border_color = theme.border,
+            .border = .{ .width = .outside(1), .color = theme.border.toClay() },
             .corner_radius = 8,
             .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 },
             .gap = 8,
@@ -714,8 +1144,10 @@ fn drawAndroidStateSlotRow(
         else
             null,
         .corner_radius = 5,
-        .border_width = 1,
-        .border_color = if (enabled) theme.border_dim else theme.border_dim.darken(0.18),
+        .border = .{
+            .width = .outside(1),
+            .color = (if (enabled) theme.border_dim else theme.border_dim.darken(0.18)).toClay(),
+        },
         .child_alignment = .{ .x = .left, .y = .center },
     });
     {
@@ -762,7 +1194,6 @@ fn drawAndroidDrawerAction(ui: *UI, text: []const u8, enabled: bool) *widgets.Bu
         .hover_color = theme.bg_hover,
         .padding = .{ .left = 20, .right = 20, .top = 14, .bottom = 14 },
         .corner_radius = 0,
-        .elevation = 0,
         .sizing = .{ .w = .grow, .h = .fit },
         .text_alignment = .left,
         .enabled = enabled,
@@ -830,7 +1261,6 @@ fn drawAndroidEditModeHeader(ui: *UI, app_state: *AppState, orientation: android
                 .hover_color = theme.border,
                 .padding = .{ .left = 14, .right = 14, .top = 8, .bottom = 8 },
                 .corner_radius = 5,
-                .elevation = 0,
             }).clicked(ui.current_window.ctx)) {
                 closeAndroidEditMode(ui, app_state, false);
             }
@@ -854,7 +1284,6 @@ fn drawAndroidEditModeHeader(ui: *UI, app_state: *AppState, orientation: android
                 .hover_color = theme.accent_blue.lighten(0.12),
                 .padding = .{ .left = 16, .right = 16, .top = 8, .bottom = 8 },
                 .corner_radius = 5,
-                .elevation = 0,
             }).clicked(ui.current_window.ctx)) {
                 closeAndroidEditMode(ui, app_state, true);
             }
@@ -941,7 +1370,7 @@ fn drawAndroidSettingsUI(ui: *UI, app_state: *AppState, safe_area_padding: clay.
                 .hover_color = theme.border,
                 .padding = .{ .left = 16, .right = 16, .top = 9, .bottom = 9 },
                 .corner_radius = 6,
-                .elevation = 0,
+                .enabled = !app_state.isConnectedClient(),
             }).clicked(ui.main_window.ctx)) {
                 app_state.show_android_settings_ui = false;
                 app_state.render_home_ui = true;
@@ -957,7 +1386,6 @@ fn drawAndroidSettingsUI(ui: *UI, app_state: *AppState, safe_area_padding: clay.
                 .hover_color = theme.accent_blue.lighten(0.12),
                 .padding = .{ .left = 18, .right = 18, .top = 9, .bottom = 9 },
                 .corner_radius = 6,
-                .elevation = 0,
             }).clicked(ui.main_window.ctx)) {
                 app_state.show_android_settings_ui = false;
                 app_state.render_home_ui = !app_state.emulation_running;
@@ -986,7 +1414,6 @@ fn drawAndroidSettingsTab(ui: *UI, app_state: *AppState, category: SettingsCateg
         .hover_color = if (is_active) theme.accent_blue.lighten(0.1) else theme.border,
         .padding = .{ .left = 12, .right = 12, .top = 9, .bottom = 9 },
         .corner_radius = 6,
-        .elevation = 0,
     }).clicked(ui.main_window.ctx)) {
         if (app_state.selected_category == .controls and category != .controls) {
             android.setScreenOrientation(.unspecified);
@@ -1019,8 +1446,7 @@ fn drawAndroidShaderFilePicker(ui: *UI, app_state: *AppState, root_id: clay.Elem
                     .h = .fitMinMax(.{ .max = max_panel_h }),
                 },
                 .bg_color = theme.bg_section,
-                .border_width = 1,
-                .border_color = theme.border,
+                .border = .{ .width = .outside(1), .color = theme.border.toClay() },
                 .corner_radius = 4,
                 .padding = .{ .left = 12, .right = 12, .top = 12, .bottom = 12 },
                 .gap = 10,
@@ -1058,7 +1484,6 @@ fn drawAndroidShaderFilePickerHeader(ui: *UI, app_state: *AppState) void {
             .hover_color = theme.border,
             .padding = .{ .left = 10, .right = 10, .top = 6, .bottom = 6 },
             .corner_radius = 3,
-            .elevation = 0,
         }).clicked(ui.main_window.ctx)) {
             app_state.closeShaderFilePicker();
         }
@@ -1104,7 +1529,6 @@ fn drawAndroidShaderFilePickerBody(ui: *UI, app_state: *AppState) void {
                 .hover_color = theme.bg_hover,
                 .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 },
                 .corner_radius = 2,
-                .elevation = 0,
                 .sizing = .{ .w = .grow, .h = .fit },
                 .text_alignment = .left,
             }).clicked(ui.main_window.ctx)) {
@@ -1130,7 +1554,6 @@ fn drawAndroidShaderFilePickerBody(ui: *UI, app_state: *AppState) void {
                     .hover_color = theme.bg_hover,
                     .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 },
                     .corner_radius = 2,
-                    .elevation = 0,
                     .sizing = .{ .w = .grow, .h = .fit },
                     .text_alignment = .left,
                 }).clicked(ui.main_window.ctx)) {
@@ -1205,8 +1628,7 @@ const DraggableResizable = struct {
         const box = ui.column(.{
             .sizing = .grow,
             .bg_color = theme.accent_blue.withAlpha(0.08),
-            .border_color = theme.accent_blue.withAlpha(0.82),
-            .border_width = 1,
+            .border = .{ .width = .outside(1), .color = theme.accent_blue.withAlpha(0.82).toClay() },
             .corner_radius = 10,
             .child_alignment = .center,
         });
@@ -1468,8 +1890,7 @@ fn drawResizeHandle(
         const body = ui.column(.{
             .sizing = .grow,
             .bg_color = theme.accent_blue.withAlpha(0.92),
-            .border_color = Color.white.withAlpha(0.5),
-            .border_width = 1,
+            .border = .{ .width = .outside(1), .color = Color.white.withAlpha(0.5).toClay() },
             .corner_radius = 3,
         });
         body.end();
@@ -1556,8 +1977,6 @@ fn drawAndroidOnScreenStartBtn(ui: *UI, resize_scale: f32, interactive: bool) vo
         .hover_color = theme.bg_hover.withAlpha(0.82),
         .padding = .all(0),
         .corner_radius = 10,
-        .elevation = 0,
-        .border_width = 1,
         .border = .{ .color = Color.white.withAlpha(0.28).toClay(), .width = .outside(1) },
     });
     if (interactive and start_button.clickedOrHold(ui.main_window.ctx)) ui.pressOnScreenControllerButton(.start);
@@ -1573,8 +1992,6 @@ fn drawAndroidOnScreenSelectBtn(ui: *UI, resize_scale: f32, interactive: bool) v
         .hover_color = theme.bg_hover.withAlpha(0.82),
         .padding = .all(0),
         .corner_radius = 10,
-        .elevation = 0,
-        .border_width = 1,
         .border = .{ .color = Color.white.withAlpha(0.28).toClay(), .width = .outside(1) },
     });
     if (interactive and select_button.clickedOrHold(ui.main_window.ctx)) ui.pressOnScreenControllerButton(.select);
@@ -1600,11 +2017,9 @@ fn controllerButton(
         .sizing = sizing,
         .bg_color = Color.black.withAlpha(0.52),
         .hover_color = theme.accent_blue.withAlpha(0.72),
-        .border_width = 1,
         .border = .{ .color = Color.white.withAlpha(0.28).toClay(), .width = .outside(1) },
         .corner_radius = 10,
         .padding = .all(0),
-        .elevation = 0,
     });
 }
 
@@ -1700,7 +2115,6 @@ fn drawHomeUI(ui: *UI, app_state: *AppState, safe_area_padding: clay.Padding) vo
                         .text_color = Color.white,
                         .padding = .{ .left = 28, .right = 28, .top = 10, .bottom = 10 },
                         .corner_radius = 6,
-                        .elevation = 0,
                     }).clicked(ui.main_window.ctx)) openRomDialog(ui, app_state);
                     _ = ui.spacer(.{ .sizing = .{ .w = .fixed(0), .h = .fixed(14) } });
                     _ = ui.label(.{ .text = "or use System > Open", .font_size = 13, .color = theme.text_secondary });
@@ -1780,8 +2194,7 @@ fn drawGameCard(ui: *UI, app_state: *AppState, entry: *const game_history.GameEn
         .bg_color = theme.bg_section,
         .hover_bg_color = theme.bg_hover,
         .corner_radius = CARD_CORNER_RADIUS,
-        .border_width = 1,
-        .border_color = theme.border_dim,
+        .border = .{ .width = .outside(1), .color = theme.border_dim.toClay() },
         .child_alignment = .{ .x = .left, .y = .top },
         .gap = 0,
     });
@@ -1918,7 +2331,6 @@ fn drawSettingsFooter(ui: *UI, app_state: *AppState) void {
             .hover_color = theme.border,
             .padding = .{ .left = 14, .right = 14, .top = 7, .bottom = 7 },
             .corner_radius = 3,
-            .elevation = 0,
         }).clicked(ui.current_window.ctx)) {
             app_state.restoreSavedSettings();
             ui.closeCurrentWindow();
@@ -1933,7 +2345,6 @@ fn drawSettingsFooter(ui: *UI, app_state: *AppState) void {
             .hover_color = if (has_changes) theme.accent_blue.lighten(0.12) else theme.bg_hover,
             .padding = .{ .left = 16, .right = 16, .top = 7, .bottom = 7 },
             .corner_radius = 3,
-            .elevation = 0,
         }).clicked(ui.current_window.ctx)) {
             app_state.saveSettings();
             ui.closeCurrentWindow(); // close settings window
@@ -1969,7 +2380,6 @@ fn drawSidebarItem(ui: *UI, app_state: *AppState, category: SettingsCategory) vo
         .hover_color = if (is_active) nav_active_bg else nav_hover_bg,
         .padding = .{ .left = 14, .right = 14, .top = 9, .bottom = 9 },
         .corner_radius = 0,
-        .elevation = 0,
         .sizing = .{ .w = .grow, .h = .fit },
         .text_alignment = .left,
     }).clicked(ui.current_window.ctx)) {
@@ -2016,8 +2426,7 @@ fn drawContentSection(ui: *UI, params: struct { padding: ?clay.Padding = null, s
         .bg_color = theme.bg_section,
         .padding = if (params.padding) |padding| padding else .{ .left = 14, .right = 14, .top = 12, .bottom = 12 },
         .gap = 12,
-        .border_width = 1,
-        .border_color = theme.border_dim,
+        .border = .{ .width = .outside(1), .color = theme.border_dim.toClay() },
         .corner_radius = 3,
         .child_alignment = .{ .x = .left, .y = .top },
     });
@@ -2179,7 +2588,6 @@ fn drawTouchControlsSettingSection(ui: *UI, app_state: *AppState) void {
                 .hover_color = theme.accent_blue.lighten(0.12),
                 .padding = .{ .left = 18, .right = 18, .top = 9, .bottom = 9 },
                 .corner_radius = 6,
-                .elevation = 0,
             }).clicked(ui.current_window.ctx)) {
                 app_state.android_onscreen_controller = app_state.settings.android_onscreen_controller;
                 ui.setWindowFullscreen(true);
@@ -2261,7 +2669,7 @@ fn drawInputDeviceSelector(ui: *UI, app_state: *AppState) void {
             .sizing = .{ .w = .fixed(240), .h = .fit },
             .bg_color = theme.bg_hover,
             .bg_color_on_hover = theme.bg_hover,
-            .border_color = theme.border_dim,
+            .border = .{ .width = .outside(1), .color = theme.border_dim.toClay() },
             .border_color_on_open = theme.border_open,
             .border_color_on_hover = theme.border,
             .text_color = theme.text_primary,
@@ -2305,7 +2713,6 @@ fn drawControllerPlayerSelector(ui: *UI, app_state: *AppState) void {
                 .hover_color = if (is_selected) nav_active_bg else nav_hover_bg,
                 .padding = .{ .left = 10, .right = 10, .top = 6, .bottom = 6 },
                 .corner_radius = 3,
-                .elevation = 0,
             }).clicked(ui.current_window.ctx)) {
                 app_state.settings.selected_player = player;
                 app_state.settings.capture_binding = null;
@@ -2528,11 +2935,21 @@ fn drawEmulationSpeedRow(ui: *UI, app_state: *AppState) void {
 
         _ = ui.spacer(.{ .sizing = .grow });
 
+        if (app_state.isConnectedClient()) {
+            _ = ui.label(.{
+                .text = app_state.settings.emulation_speed.label(),
+                .font_size = theme.LABEL_FONT,
+                .color = theme.text_value,
+            });
+            row.end();
+            return;
+        }
+
         const speed_opts = ui.combobox(EmulationSpeed, .{
             .selected = app_state.settings.emulation_speed,
             .bg_color = theme.bg_hover,
             .bg_color_on_hover = theme.bg_hover,
-            .border_color = theme.border_dim,
+            .border = .{ .width = .outside(1), .color = theme.border_dim.toClay() },
             .border_color_on_open = theme.border_open,
             .border_color_on_hover = theme.border,
             .text_color = theme.text_primary,
@@ -2576,7 +2993,7 @@ fn drawAspectRatioRow(ui: *UI, app_state: *AppState) void {
             .selected = app_state.settings.aspect_ratio,
             .bg_color = theme.bg_hover,
             .bg_color_on_hover = theme.bg_hover,
-            .border_color = theme.border_dim,
+            .border = .{ .width = .outside(1), .color = theme.border_dim.toClay() },
             .border_color_on_open = theme.border_open,
             .border_color_on_hover = theme.border,
             .text_color = theme.text_primary,
@@ -2699,7 +3116,6 @@ fn drawAndroidShaderDownload(ui: *UI, app_state: *AppState) void {
             .bg_color = if (can_download) theme.bg_hover else theme.bg_panel,
             .hover_color = if (can_download) theme.border else theme.bg_panel,
             .padding = .{ .left = 10, .right = 10, .top = 5, .bottom = 5 },
-            .elevation = 0,
         }).clicked(ui.current_window.ctx)) {
             app_state.startShaderDownload() catch |err| {
                 std.log.err("failed to start shader download: {s}", .{@errorName(err)});
@@ -2944,7 +3360,6 @@ fn drawShaderPresetRow(ui: *UI, app_state: *AppState) void {
             .bg_color = theme.bg_hover,
             .hover_color = theme.border,
             .padding = .{ .left = 10, .right = 10, .top = 5, .bottom = 5 },
-            .elevation = 0,
         }).clicked(ui.current_window.ctx)) {
             if (builtin.abi.isAndroid()) {
                 app_state.openShaderFilePicker(.main);
@@ -2972,7 +3387,6 @@ fn drawShaderPresetRow(ui: *UI, app_state: *AppState) void {
             .bg_color = if (can_clear_shader) theme.bg_hover else theme.bg_panel,
             .hover_color = if (can_clear_shader) theme.border else theme.bg_panel,
             .padding = .{ .left = 10, .right = 10, .top = 5, .bottom = 5 },
-            .elevation = 0,
         }).clicked(ui.current_window.ctx)) {
             if (app_state.settings.shader_preset_path) |path| {
                 app_state.alloc.free(path);
@@ -3171,7 +3585,7 @@ fn drawBorderShaderPresetRow(ui: *UI, app_state: *AppState) void {
             .selected = app_state.settings.border_shader,
             .bg_color = theme.bg_hover,
             .bg_color_on_hover = theme.bg_hover,
-            .border_color = theme.border_dim,
+            .border = .{ .width = .outside(1), .color = theme.border_dim.toClay() },
             .border_color_on_open = theme.border_open,
             .border_color_on_hover = theme.border,
             .text_color = theme.text_primary,

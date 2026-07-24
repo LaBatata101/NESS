@@ -34,8 +34,7 @@ pub fn drawUI(ui: *UI, app_state: *AppState) void {
         .attach_points = .{ .element = .center_top, .parent = .center_top },
         .parentId = root.id.id,
         .bg_color = theme.bg_section,
-        .border_color = theme.border,
-        .border_width = 1,
+        .border = .{ .width = .outside(1), .color = theme.border.toClay() },
         .corner_radius = 8,
         .grip_color = theme.text_muted,
     });
@@ -119,8 +118,7 @@ fn drawSectionHeader(ui: *UI, title: []const u8, accent: Color) void {
         .padding = theme.HEADER_PAD,
         .child_alignment = .{ .y = .center },
         .gap = 8,
-        .border_width = 1,
-        .border_color = theme.border_dim,
+        .border = .{ .width = .outside(1), .color = theme.border_dim.toClay() },
     });
     {
         // Coloured left accent bar
@@ -461,8 +459,7 @@ fn drawRegisterBadge(ui: *UI, label: []const u8, value: []const u8, accent: Colo
     const badge = ui.row(.{
         .sizing = .fit,
         .bg_color = theme.bg_section,
-        .border_width = 1,
-        .border_color = theme.border,
+        .border = .{ .width = .outside(1), .color = theme.border.toClay() },
         .corner_radius = 4,
         .padding = .{ .left = 0, .right = 8, .top = 4, .bottom = 4 },
         .child_alignment = .{ .y = .center },
@@ -492,8 +489,7 @@ fn drawFlagBadge(ui: *UI, name: []const u8, active: bool) void {
     const pill = ui.row(.{
         .sizing = .{ .w = .fixed(26), .h = .fixed(22) },
         .bg_color = bg,
-        .border_width = 1,
-        .border_color = bdr,
+        .border = .{ .width = .outside(1), .color = bdr.toClay() },
         .corner_radius = 3,
         .child_alignment = .center,
     });
@@ -539,8 +535,7 @@ fn drawStatBadge(ui: *UI, key: []const u8, value: []const u8, accent: Color) voi
     const cell = ui.column(.{
         .sizing = .fit,
         .bg_color = theme.bg_section,
-        .border_width = 1,
-        .border_color = theme.border,
+        .border = .{ .width = .outside(1), .color = theme.border.toClay() },
         .corner_radius = 4,
         .padding = .{ .left = 10, .right = 10, .top = 5, .bottom = 5 },
         .child_alignment = .{ .x = .left, .y = .top },
@@ -586,8 +581,7 @@ fn drawPatternTablesPanel(ui: *UI, snapshot: *const AppState.DebugSnapshot) void
             const pt1_wrapper = ui.column(.{
                 .sizing = .fit,
                 .bg_color = theme.bg_section,
-                .border_width = 1,
-                .border_color = theme.border,
+                .border = .{ .width = .outside(1), .color = theme.border.toClay() },
                 .corner_radius = 3,
                 .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 2 },
                 .gap = 4,
@@ -609,8 +603,7 @@ fn drawPatternTablesPanel(ui: *UI, snapshot: *const AppState.DebugSnapshot) void
             const pt2_wrapper = ui.column(.{
                 .sizing = .fit,
                 .bg_color = theme.bg_section,
-                .border_width = 1,
-                .border_color = theme.border,
+                .border = .{ .width = .outside(1), .color = theme.border.toClay() },
                 .corner_radius = 3,
                 .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 2 },
                 .gap = 4,
@@ -667,8 +660,7 @@ fn drawPaletteGroup(
     const grp = ui.column(.{
         .sizing = .{ .w = .grow, .h = .fit },
         .bg_color = theme.bg_section,
-        .border_width = 1,
-        .border_color = theme.border,
+        .border = .{ .width = .outside(1), .color = theme.border.toClay() },
         .corner_radius = 4,
         .padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 8 },
         .gap = 6,
@@ -687,8 +679,7 @@ fn drawPaletteGroup(
                 const sub = ui.row(.{
                     .sizing = .fit,
                     .bg_color = theme.bg_panel,
-                    .border_width = 1,
-                    .border_color = theme.border_dim,
+                    .border = .{ .width = .outside(1), .color = theme.border_dim.toClay() },
                     .corner_radius = 2,
                     .padding = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 },
                     .gap = theme.SWATCH_GAP,

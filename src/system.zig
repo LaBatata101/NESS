@@ -29,6 +29,18 @@ pub const System = struct {
     trace_file_buffer: [4096]u8,
 
     const Self = @This();
+    pub const Snapshot = struct {
+        saved_at: i64 = 0,
+        cpu: CPU.Snapshot,
+        bus: Bus.Snapshot,
+        ppu: PPU.Snapshot,
+        apu: APU.Snapshot,
+
+        pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+            self.bus.deinit(alloc);
+            self.ppu.deinit(alloc);
+        }
+    };
 
     pub const ControllerSnapshot = struct {
         player1: ControllerButton = .{},
@@ -179,5 +191,21 @@ pub const System = struct {
     pub fn applyControllerSnapshot(self: *Self, snapshot: ControllerSnapshot) void {
         self.bus.controllers.cntrl1_status = snapshot.player1;
         self.bus.controllers.cntrl2_status = snapshot.player2;
+    }
+
+    pub fn saveState(self: *const Self, alloc: std.mem.Allocator) !Snapshot {
+        return .{
+            .cpu = self.cpu.saveState(),
+            .bus = try self.bus.saveState(alloc),
+            .ppu = try self.ppu.saveState(alloc),
+            .apu = self.apu.saveState(),
+        };
+    }
+
+    pub fn loadState(self: *Self, snapshot: *const Snapshot) !void {
+        try self.bus.loadState(&snapshot.bus);
+        self.ppu.loadState(&snapshot.ppu);
+        self.apu.loadState(&snapshot.apu);
+        self.cpu.loadState(snapshot.cpu);
     }
 };
