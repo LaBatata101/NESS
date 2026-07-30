@@ -105,6 +105,11 @@ pub fn build(b: *std.Build) void {
         .use_pkg_config = .no,
     });
 
+    if (target.result.os.tag == .macos) {
+        iroh.linkFramework("Security", .{});
+        iroh.linkFramework("SystemConfiguration", .{});
+    }
+
     const tests = b.addTest(.{ .root_module = iroh });
     const run_tests = b.addRunArtifact(tests);
 

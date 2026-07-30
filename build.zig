@@ -90,6 +90,20 @@ pub fn build(b: *std.Build) !void {
 
             linkAppLibraries(exe, deps);
 
+            if (target.result.os.tag == .macos) {
+                exe.root_module.addObjectFile(b.path("third-party/MoltenVK/libMoltenVK.a"));
+
+                // SDL finds a statically linked MoltenVK using:
+                // dlsym(RTLD_DEFAULT, "vkGetInstanceProcAddr").
+                //
+                // Ensure the archive member is included and the symbol is visible
+                // in the executable's dynamic symbol table.
+                exe.forceUndefinedSymbol("_vkGetInstanceProcAddr");
+                exe.rdynamic = true;
+
+                exe.root_module.linkFramework("IOSurface", .{});
+            }
+
             b.installArtifact(exe);
 
             const run_step = b.step("run", "Run the app");
