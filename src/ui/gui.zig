@@ -2058,9 +2058,13 @@ fn drawStateSlotItems(ui: *UI, app_state: *AppState, mode: SaveStateMenuMode) vo
 
 const FilePickerCallbackData = struct { ui: *UI, app_state: *AppState };
 fn openRomDialog(ui: *UI, app_state: *AppState) void {
-    const default_location = std.process.getCwdAlloc(ui.main_window.ctx.frameAlloc()) catch
-        @panic("Failed to allocate");
-    defer ui.main_window.ctx.frameAlloc().free(default_location);
+    const alloc = app_state.alloc;
+    const default_location = std.process.getCwdAlloc(alloc) catch
+        @panic("OOM");
+    defer alloc.free(default_location);
+
+    const default_location_z = alloc.dupeZ(u8, default_location) catch @panic("OOM");
+    defer alloc.free(default_location_z);
 
     const data = ui.main_window.ctx.persistent_arena.allocator()
         .create(FilePickerCallbackData) catch @panic("OOM");
@@ -2072,7 +2076,7 @@ fn openRomDialog(ui: *UI, app_state: *AppState) void {
         ui.main_window.ptr,
         &dialog_filter_list,
         dialog_filter_list.len,
-        default_location.ptr,
+        default_location_z.ptr,
         false,
     );
 }
@@ -3364,8 +3368,12 @@ fn drawShaderPresetRow(ui: *UI, app_state: *AppState) void {
             if (builtin.abi.isAndroid()) {
                 app_state.openShaderFilePicker(.main);
             } else {
-                const default_location = std.process.getCwdAlloc(ui.main_window.ctx.frameAlloc()) catch @panic("OOM");
-                defer ui.main_window.ctx.frameAlloc().free(default_location);
+                const alloc = app_state.alloc;
+                const default_location = std.process.getCwdAlloc(alloc) catch @panic("OOM");
+                defer alloc.free(default_location);
+
+                const default_location_z = alloc.dupeZ(u8, default_location) catch @panic("OOM");
+                defer alloc.free(default_location_z);
 
                 c.SDL_ShowOpenFileDialog(
                     shader_dialog_callback,
@@ -3373,7 +3381,7 @@ fn drawShaderPresetRow(ui: *UI, app_state: *AppState) void {
                     ui.main_window.ptr,
                     &shader_filter_list,
                     shader_filter_list.len,
-                    default_location.ptr,
+                    default_location_z.ptr,
                     false,
                 );
             }
