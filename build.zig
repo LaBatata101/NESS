@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) !void {
 
     const root_target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const iroh_lib_dir = b.option([]const u8, "iroh-lib-dir", "Directory containing a prebuilt iroh-ffi static archive");
     const android_targets = android.standardTargets(b, root_target);
 
     var root_target_single = [_]std.Build.ResolvedTarget{root_target};
@@ -48,7 +49,7 @@ pub fn build(b: *std.Build) !void {
     for (targets) |target| {
         if (target.result.cpu.arch == .x86 or target.result.cpu.arch == .arm) continue;
 
-        const deps = try createNessModule(b, target, optimize);
+        const deps = try createNessModule(b, target, optimize, iroh_lib_dir);
 
         const app_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -177,6 +178,7 @@ fn createNessModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    iroh_lib_dir: ?[]const u8,
 ) !NessDeps {
     const preferred_linkage: std.builtin.LinkMode = if (target.result.abi.isAndroid()) .dynamic else .static;
 
@@ -262,8 +264,7 @@ fn createNessModule(
     const vk_headers = b.dependency("vulkan_headers", .{});
     mod.addIncludePath(vk_headers.path("include"));
 
-    const override = b.option([]const u8, "iroh-lib-dir", "Directory containing a prebuilt iroh-ffi static archive");
-    const iroh_dep = if (override) |lib_dir|
+    const iroh_dep = if (iroh_lib_dir) |lib_dir|
         b.dependency("iroh", .{
             .target = target,
             .optimize = optimize,
