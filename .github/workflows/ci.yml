@@ -65,7 +65,8 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install vulkan-loader
 
-      - name: Run tests
-        run: |
-          zig build test
-          zig build test --release=fast -Drom-tests=true
+      - name: Run unit tests
+        run: zig build test
+
+      - name: Run ROM tests
+        run: zig build test --release=fast -Drom-tests=true
