@@ -17,6 +17,7 @@ const pipeline = @import("../../shaders/pipeline.zig");
 const GamepadButton = @import("../bindings.zig").GamepadButton;
 const ControllerAction = @import("../bindings.zig").ControllerAction;
 const ControllerButton = @import("../../controller.zig").ControllerButton;
+const env = @import("../../env.zig");
 
 const PIXELOID_FONT = @embedFile("pixeloid_font");
 const APP_ICON = @embedFile("app_icon");
@@ -28,7 +29,7 @@ fn handleClayError(error_data: clay.ErrorData) callconv(.c) void {
 const FontUserData = struct {
     font_cache: *FontCache,
     scale: *const f32,
-    measure_cache: *std.AutoArrayHashMap(u64, clay.Dimensions),
+    measure_cache: *std.AutoHashMap(u64, clay.Dimensions),
 
     const MEASURE_CACHE_MAX_ENTRIES = 4096;
 
@@ -98,11 +99,11 @@ const FontCache = struct {
     const MAX_LAYOUTS: usize = 4096;
     const COMMON_FONT_SIZES = [_]u16{ 12, 13, 14, 15, 16, 18, 19, 20, 25, 42 };
 
-    fn init(allocator: std.mem.Allocator, device: ?*c.SDL_GPUDevice, initial_scale: f32) !*Self {
+    fn init(allocator: std.mem.Allocator, io: std.Io, device: ?*c.SDL_GPUDevice, initial_scale: f32) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
-        var library = try raster.Library.init(allocator);
+        var library = try raster.Library.init(allocator, io);
         errdefer library.deinit();
         var face = try raster.Face.initMemory(library, PIXELOID_FONT, 0, .{
             .size = desiredSize(16, initial_scale),
@@ -408,8 +409,8 @@ pub const UIContext = struct {
     // Persistent widget state (survives across frames)
     widgets: WidgetStateMap,
 
-    text_measure_cache: std.AutoArrayHashMap(u64, clay.Dimensions),
-    canvas_cache: std.AutoArrayHashMap(u32, CanvasCacheItem),
+    text_measure_cache: std.AutoHashMap(u64, clay.Dimensions),
+    canvas_cache: std.AutoHashMap(u32, CanvasCacheItem),
 
     timers: std.AutoHashMap(u64, struct { start: u64, ms: u64 }),
 
@@ -450,8 +451,8 @@ pub const UIContext = struct {
 
         ctx.dt = 0;
         ctx.widgets = WidgetStateMap.init(persistent_arena_alloc);
-        ctx.text_measure_cache = std.AutoArrayHashMap(u64, clay.Dimensions).init(persistent_arena_alloc);
-        ctx.canvas_cache = std.AutoArrayHashMap(u32, CanvasCacheItem).init(persistent_arena_alloc);
+        ctx.text_measure_cache = std.AutoHashMap(u64, clay.Dimensions).init(persistent_arena_alloc);
+        ctx.canvas_cache = std.AutoHashMap(u32, CanvasCacheItem).init(persistent_arena_alloc);
 
         ctx.input = InputContext.init();
         ctx.fingers = [_]FingerState{.{}} ** MAX_ACTIVE_TOUCHES;
@@ -1476,7 +1477,7 @@ pub const Renderer = struct {
         }) orelse error.ShaderCreateFailed;
     }
 
-    fn init(allocator: std.mem.Allocator, device: ?*c.SDL_GPUDevice, window: ?*c.SDL_Window, vk_version: c_uint) !*Self {
+    fn init(allocator: std.mem.Allocator, io: std.Io, device: ?*c.SDL_GPUDevice, window: ?*c.SDL_Window, vk_version: c_uint) !*Self {
         var self = try allocator.create(Self);
         self.allocator = allocator;
         self.device = device;
@@ -1485,7 +1486,7 @@ pub const Renderer = struct {
 
         sdlError(c.SDL_ClaimWindowForGPUDevice(device, window));
 
-        var shader_compiler = try shaders.ShaderCompiler.init(allocator);
+        var shader_compiler = try shaders.ShaderCompiler.init(allocator, io);
         defer shader_compiler.deinit();
 
         try shader_compiler.addShader(shaders.VERT, .Vertex);
@@ -1515,7 +1516,7 @@ pub const Renderer = struct {
             c.SDL_ReleaseGPUShader(device, frag);
         }
 
-        var text_shader_compiler = try shaders.ShaderCompiler.init(allocator);
+        var text_shader_compiler = try shaders.ShaderCompiler.init(allocator, io);
         defer text_shader_compiler.deinit();
         try text_shader_compiler.addShader(shaders.TEXT_VERT, .Vertex);
         try text_shader_compiler.addShader(shaders.TEXT_FRAG, .Fragment);
@@ -2342,6 +2343,7 @@ fn loadIconTexture(device: ?*c.SDL_GPUDevice, png_data: []const u8) ?*c.SDL_GPUT
 
 pub const UI = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     /// The main windows created by the program.
     main_window: *Window,
     /// Secondary windows created by the program, e.g. dialogs.
@@ -2402,7 +2404,7 @@ pub const UI = struct {
     const Self = @This();
     const CLAY_ERROR_HANDLER = clay.ErrorHandler{ .error_handler_function = handleClayError };
 
-    pub fn init(allocator: std.mem.Allocator, title: []const u8, width: i32, height: i32) !*Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, title: []const u8, width: i32, height: i32) !*Self {
         sdlError(c.SDL_SetAppMetadata("NESkwik", "1.0.0", "com.labatata.neskwik"));
         sdlError(c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO | c.SDL_INIT_GAMEPAD));
 
@@ -2458,10 +2460,9 @@ pub const UI = struct {
             CLAY_ERROR_HANDLER,
         );
 
-        if (std.process.getEnvVarOwned(allocator, "UI_DEBUG")) |value| {
+        if (env.get("UI_DEBUG")) |value| {
             clay.setDebugModeEnabled(std.mem.eql(u8, value, "1"));
-            allocator.free(value);
-        } else |_| {}
+        }
 
         const main_window = try allocator.create(Window);
         const win_ptr = sdlError(c.SDL_CreateWindow(
@@ -2470,7 +2471,7 @@ pub const UI = struct {
             height,
             c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY,
         ));
-        const font_cache = try FontCache.init(allocator, gpu_device, Window.currentDisplayScale(win_ptr));
+        const font_cache = try FontCache.init(allocator, io, gpu_device, Window.currentDisplayScale(win_ptr));
         const display_scale = Window.currentDisplayScale(win_ptr);
         main_window.* = .{
             .ptr = win_ptr,
@@ -2484,7 +2485,7 @@ pub const UI = struct {
             .safe_area = Window.fullWindowArea(width, height),
             .title = title,
             .ctx = ui_ctx,
-            .renderer = try Renderer.init(allocator, gpu_device, win_ptr, vk_version),
+            .renderer = try Renderer.init(allocator, io, gpu_device, win_ptr, vk_version),
             .font_user_data = .{
                 .font_cache = font_cache,
                 .scale = &main_window.display_scale,
@@ -2502,6 +2503,7 @@ pub const UI = struct {
         const gui = try allocator.create(UI);
         gui.* = .{
             .allocator = allocator,
+            .io = io,
             .main_window = main_window,
             .secondary_windows = .empty,
             .current_window = main_window,
@@ -2644,7 +2646,7 @@ pub const UI = struct {
     /// Poll progress and completion each frame via `pollShaderLoad`.
     pub fn loadShaderPreset(self: *Self, name: []const u8, path: []const u8) !void {
         const shader_pipeline = self.shaders_pipeline.get(name) orelse blk: {
-            const new_pipeline = try pipeline.ShaderPipeline.init(self.allocator, self.gpu_device, self.vk_version);
+            const new_pipeline = try pipeline.ShaderPipeline.init(self.allocator, self.io, self.gpu_device, self.vk_version);
             errdefer new_pipeline.deinit();
 
             const owned_name = try self.allocator.dupe(u8, name);
@@ -2725,6 +2727,7 @@ pub const UI = struct {
             ) catch @panic("OOM"),
             .renderer = Renderer.init(
                 self.allocator,
+                self.io,
                 self.gpu_device,
                 win_ptr,
                 vulkan.detect_vulkan_version(),

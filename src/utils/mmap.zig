@@ -29,7 +29,7 @@ pub extern "kernel32" fn MapViewOfFile(
 
 pub extern "kernel32" fn UnmapViewOfFile(lpBaseAddress: std.os.windows.LPCVOID) callconv(.winapi) BOOL;
 
-pub fn mmap(file: *const std.fs.File, size: usize) ![]u8 {
+pub fn mmap(file: *const std.Io.File, size: usize) ![]u8 {
     return if (builtin.target.os.tag == .windows) blk: {
         const map_handle = CreateFileMappingW(
             file.handle,
@@ -49,7 +49,7 @@ pub fn mmap(file: *const std.fs.File, size: usize) ![]u8 {
     } else try std.posix.mmap(
         null,
         size,
-        std.posix.PROT.READ | std.posix.PROT.WRITE,
+        .{ .READ = true, .WRITE = true },
         .{ .TYPE = .SHARED },
         file.handle,
         0,

@@ -1,5 +1,6 @@
 .zig-cache/
 zig-out/
+zig-pkg/
 .vscode/
 sample_roms/
 test_roms3/

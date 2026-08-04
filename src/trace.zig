@@ -4,7 +4,7 @@ const CPU = @import("cpu.zig").CPU;
 const opcodes = @import("opcodes.zig");
 const OpCode = opcodes.OpCode;
 
-pub fn trace(writer: *std.io.Writer, cpu: *CPU) !void {
+pub fn trace(writer: *std.Io.Writer, cpu: *CPU) !void {
     try writer.print("{s}\n", .{try format_trace(cpu)});
 }
 

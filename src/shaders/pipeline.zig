@@ -743,6 +743,7 @@ fn getOrCompileSpirv(
 
 fn compileAndCreatePipeline(
     alloc: std.mem.Allocator,
+    io: std.Io,
     device: ?*c.SDL_GPUDevice,
     vk_version: c_uint,
     path: []const u8,
@@ -752,13 +753,11 @@ fn compileAndCreatePipeline(
 ) !CompilePassResult {
     const embedded_source = builtin_shaders.sourceForPath(path);
     const raw_source = if (embedded_source) |source| source else blk: {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-        break :blk try file.readToEndAlloc(alloc, 1024 * 1024);
+        break :blk try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(1024 * 1024));
     };
     defer if (embedded_source == null) alloc.free(raw_source);
 
-    var shader = try parser.parseShader(alloc, std.fs.path.dirname(path).?, raw_source);
+    var shader = try parser.parseShader(alloc, io, std.fs.path.dirname(path).?, raw_source);
     defer shader.deinit(alloc);
 
     const spirv = try getOrCompileSpirv(alloc, vk_version, &shader, shader_cache, path, pass_id);
@@ -852,6 +851,7 @@ fn compileAndCreatePipeline(
 
 const WorkerArgs = struct {
     alloc: std.mem.Allocator,
+    io: std.Io,
     preset: *LoadedPreset,
     shader_dir: []const u8,
     pass: *slangp.ShaderPass,
@@ -859,7 +859,7 @@ const WorkerArgs = struct {
     vk_version: c_uint,
     swapchain_format: c.SDL_GPUTextureFormat,
     initial_values: *const std.StringHashMap(slangp.TypeUnion),
-    mutex: *std.Thread.Mutex,
+    mutex: *std.Io.Mutex,
     had_error: *bool,
     compile_progress: *std.atomic.Value(u32),
     shader_cache: *ShaderCache,
@@ -868,9 +868,9 @@ const WorkerArgs = struct {
 fn compilePassWorker(args: WorkerArgs) void {
     compilePassWorkerInner(args) catch |err| {
         std.log.err("Failed to compile shader pass {}: {s}", .{ args.pass.id, @errorName(err) });
-        args.mutex.lock();
+        args.mutex.lockUncancelable(args.io);
         args.had_error.* = true;
-        args.mutex.unlock();
+        args.mutex.unlock(args.io);
     };
 }
 
@@ -890,6 +890,7 @@ fn compilePassWorkerInner(args: WorkerArgs) !void {
 
     const result = try compileAndCreatePipeline(
         args.alloc,
+        args.io,
         args.device,
         args.vk_version,
         pass_path,
@@ -932,8 +933,8 @@ fn compilePassWorkerInner(args: WorkerArgs) !void {
     else
         null;
 
-    args.mutex.lock();
-    defer args.mutex.unlock();
+    args.mutex.lockUncancelable(args.io);
+    defer args.mutex.unlock(args.io);
 
     for (result.params) |param| {
         const bytes = if (args.initial_values.get(param.name)) |initial|
@@ -1005,7 +1006,7 @@ const ParsedPreset = struct {
 };
 
 /// Read and parse a `.slangp` preset file.
-fn parsePresetFile(alloc: std.mem.Allocator, path: []const u8) !ParsedPreset {
+fn parsePresetFile(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !ParsedPreset {
     if (builtin_shaders.sourceForPath(path)) |source| {
         const content = try alloc.dupe(u8, source);
         errdefer alloc.free(content);
@@ -1017,20 +1018,21 @@ fn parsePresetFile(alloc: std.mem.Allocator, path: []const u8) !ParsedPreset {
         return .{ .content = content, .shader_config = shader_config, .dir = dir };
     }
 
-    const full_path = std.fs.realpathAlloc(alloc, path) catch blk: {
-        if (std.fs.path.isAbsolute(path))
-            break :blk try alloc.dupe(u8, path);
-        const cwd = try std.process.getCwdAlloc(alloc);
+    const full_path = std.Io.Dir.cwd().realPathFileAlloc(io, path, alloc) catch blk: {
+        if (std.fs.path.isAbsolute(path)) break :blk try alloc.dupeZ(u8, path);
+
+        const cwd = try std.process.currentPathAlloc(io, alloc);
         defer alloc.free(cwd);
-        break :blk try std.fs.path.resolve(alloc, &.{ cwd, path });
+        const resolved = try std.fs.path.resolve(alloc, &.{ cwd, path });
+        defer alloc.free(resolved);
+
+        break :blk try alloc.dupeZ(u8, resolved);
     };
     defer alloc.free(full_path);
     const dir = try alloc.dupe(u8, std.fs.path.dirname(full_path).?);
     errdefer alloc.free(dir);
 
-    const file = try std.fs.cwd().openFile(full_path, .{});
-    defer file.close();
-    const content = try file.readToEndAlloc(alloc, 1024 * 1024);
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, full_path, alloc, .limited(1024 * 1024));
     errdefer alloc.free(content);
 
     const shader_config = try slangp.parse_slangp(alloc, content);
@@ -1040,6 +1042,7 @@ fn parsePresetFile(alloc: std.mem.Allocator, path: []const u8) !ParsedPreset {
 /// Load LUT textures and compile all shader passes from an already-parsed preset.
 fn compilePreset(
     alloc: std.mem.Allocator,
+    io: std.Io,
     parsed: *ParsedPreset,
     vk_version: c_uint,
     device: ?*c.SDL_GPUDevice,
@@ -1166,15 +1169,16 @@ fn compilePreset(
     };
 
     var pool: ThreadPool = undefined;
-    try pool.init(.{ .allocator = alloc, .n_jobs = std.Thread.getCpuCount() catch 4 });
+    try pool.init(.{ .allocator = alloc, .io = io, .n_jobs = std.Thread.getCpuCount() catch 4 });
     defer pool.deinit();
 
-    var mutex: std.Thread.Mutex = .{};
-    var wg: std.Thread.WaitGroup = .{};
+    var mutex: std.Io.Mutex = .init;
+    var wg = ThreadPool.WaitGroup.init(io);
     var had_error: bool = false;
     for (shader_config.passes) |*pass| {
         pool.spawnWg(&wg, compilePassWorker, .{WorkerArgs{
             .alloc = alloc,
+            .io = io,
             .preset = &preset,
             .shader_dir = dir,
             .pass = pass,
@@ -1198,6 +1202,7 @@ fn compilePreset(
 
 fn loadPresetFile(
     alloc: std.mem.Allocator,
+    io: std.Io,
     path: []const u8,
     vk_version: c_uint,
     device: ?*c.SDL_GPUDevice,
@@ -1205,9 +1210,9 @@ fn loadPresetFile(
     progress: *std.atomic.Value(u32),
     shader_cache: *ShaderCache,
 ) !LoadedPreset {
-    var parsed = try parsePresetFile(alloc, path);
+    var parsed = try parsePresetFile(alloc, io, path);
     defer parsed.deinit(alloc);
-    return compilePreset(alloc, &parsed, vk_version, device, swapchain_format, progress, shader_cache);
+    return compilePreset(alloc, io, &parsed, vk_version, device, swapchain_format, progress, shader_cache);
 }
 
 fn resolveUniformLayoutParamRefs(preset: *LoadedPreset, layout: *UniformBufferLayout) void {
@@ -1595,6 +1600,7 @@ fn renderPasses(
 
 pub const ShaderPipeline = struct {
     alloc: std.mem.Allocator,
+    io: std.Io,
     device: ?*c.SDL_GPUDevice,
     vk_version: c_uint,
 
@@ -1608,7 +1614,7 @@ pub const ShaderPipeline = struct {
     compile_progress: std.atomic.Value(u32) = .init(0),
     compile_total: u32 = 0,
     compile_thread: ?std.Thread = null,
-    compile_mutex: std.Thread.Mutex = .{},
+    compile_mutex: std.Io.Mutex = .init,
     compile_failed: bool = false,
     compile_error_msg: ?[]u8 = null,
     compile_done: std.atomic.Value(bool) = .init(false),
@@ -1629,6 +1635,7 @@ pub const ShaderPipeline = struct {
 
     pub fn init(
         alloc: std.mem.Allocator,
+        io: std.Io,
         device: ?*c.SDL_GPUDevice,
         vk_version: c_uint,
     ) !*Self {
@@ -1666,12 +1673,13 @@ pub const ShaderPipeline = struct {
 
         self.* = .{
             .alloc = alloc,
+            .io = io,
             .device = device,
             .vk_version = vk_version,
             .vertex_buffer = vertex_buffer,
             .texture_aliases = .init(alloc),
             .frame_history = .empty,
-            .cache = try ShaderCache.init(alloc),
+            .cache = try ShaderCache.init(alloc, io),
         };
         return self;
     }
@@ -1697,8 +1705,8 @@ pub const ShaderPipeline = struct {
             self.compile_thread = null;
         }
         {
-            self.compile_mutex.lock();
-            defer self.compile_mutex.unlock();
+            self.compile_mutex.lockUncancelable(self.io);
+            defer self.compile_mutex.unlock(self.io);
             if (self.compile_error_msg) |m| self.alloc.free(m);
         }
         self.clearAccumulationState();
@@ -1721,8 +1729,8 @@ pub const ShaderPipeline = struct {
             self.compile_thread = null;
         }
         {
-            self.compile_mutex.lock();
-            defer self.compile_mutex.unlock();
+            self.compile_mutex.lockUncancelable(self.io);
+            defer self.compile_mutex.unlock(self.io);
             if (self.compile_error_msg) |m| {
                 self.alloc.free(m);
                 self.compile_error_msg = null;
@@ -1794,7 +1802,7 @@ pub const ShaderPipeline = struct {
         // unloadPreset joins any in-progress thread and resets all state.
         self.unloadPreset();
 
-        var parsed = try parsePresetFile(self.alloc, path);
+        var parsed = try parsePresetFile(self.alloc, self.io, path);
         errdefer parsed.deinit(self.alloc);
         self.compile_total = @intCast(parsed.shader_config.total_passes);
 
@@ -1845,8 +1853,8 @@ pub const ShaderPipeline = struct {
             self.compile_thread = null;
         }
 
-        self.compile_mutex.lock();
-        defer self.compile_mutex.unlock();
+        self.compile_mutex.lockUncancelable(self.io);
+        defer self.compile_mutex.unlock(self.io);
 
         if (self.compile_failed) {
             return .{ .failed = self.compile_error_msg orelse "Unknown error" };
@@ -1875,6 +1883,7 @@ pub const ShaderPipeline = struct {
 
         if (compilePreset(
             self.alloc,
+            self.io,
             &ctx.parsed,
             self.vk_version,
             self.device,
@@ -1882,8 +1891,8 @@ pub const ShaderPipeline = struct {
             &self.compile_progress,
             &self.cache,
         )) |preset| {
-            self.compile_mutex.lock();
-            defer self.compile_mutex.unlock();
+            self.compile_mutex.lockUncancelable(self.io);
+            defer self.compile_mutex.unlock(self.io);
 
             self.preset = preset;
             self.preset_path = ctx.path;
@@ -1913,8 +1922,8 @@ pub const ShaderPipeline = struct {
             // Prevent the defer above from double-freeing `ctx.path` now that ownership has moved to `self.preset_path`.
             ctx.path = &.{};
         } else |err| {
-            self.compile_mutex.lock();
-            defer self.compile_mutex.unlock();
+            self.compile_mutex.lockUncancelable(self.io);
+            defer self.compile_mutex.unlock(self.io);
             self.compile_failed = true;
             self.compile_error_msg = std.fmt.allocPrint(
                 self.alloc,

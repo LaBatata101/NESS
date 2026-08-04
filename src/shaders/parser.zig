@@ -759,18 +759,19 @@ const ShaderSource = struct {
     }
 };
 
-fn resolveInclude(alloc: std.mem.Allocator, source: []const u8, dir: []const u8) ![]const u8 {
+fn resolveInclude(alloc: std.mem.Allocator, io: std.Io, source: []const u8, dir: []const u8) ![]const u8 {
     var included_files: std.StringHashMap(void) = .init(alloc);
     defer {
         var it = included_files.keyIterator();
         while (it.next()) |key| alloc.free(key.*);
         included_files.deinit();
     }
-    return resolveIncludeRecursive(alloc, source, dir, &included_files);
+    return resolveIncludeRecursive(alloc, io, source, dir, &included_files);
 }
 
 fn resolveIncludeRecursive(
     alloc: std.mem.Allocator,
+    io: std.Io,
     source: []const u8,
     dir: []const u8,
     included_files: *std.StringHashMap(void),
@@ -814,16 +815,14 @@ fn resolveIncludeRecursive(
             const content = if (embedded_include) |embedded|
                 embedded
             else blk: {
-                const file = std.fs.cwd().openFile(resolved_path, .{}) catch |err| {
+                break :blk std.Io.Dir.cwd().readFileAlloc(io, resolved_path, alloc, .unlimited) catch |err| {
                     std.log.err("Failed to open include file: {s}\n", .{resolved_path});
                     return err;
                 };
-                defer file.close();
-                break :blk try file.readToEndAlloc(alloc, std.math.maxInt(usize));
             };
             defer if (embedded_include == null) alloc.free(content);
 
-            const processed_include = try resolveIncludeRecursive(alloc, content, include_dir, included_files);
+            const processed_include = try resolveIncludeRecursive(alloc, io, content, include_dir, included_files);
             defer alloc.free(processed_include);
 
             try code.appendSlice(alloc, processed_include);
@@ -865,8 +864,8 @@ pub fn addExtension(alloc: std.mem.Allocator, source: []const u8) ![]const u8 {
     return code.toOwnedSlice(alloc);
 }
 
-fn preprocessShaderSource(alloc: std.mem.Allocator, dir: []const u8, source: []const u8) !ShaderSource {
-    const resolved_source = try resolveInclude(alloc, source, dir);
+fn preprocessShaderSource(alloc: std.mem.Allocator, io: std.Io, dir: []const u8, source: []const u8) !ShaderSource {
+    const resolved_source = try resolveInclude(alloc, io, source, dir);
     defer alloc.free(resolved_source);
 
     const tokens = try lex(alloc, resolved_source);
@@ -991,8 +990,8 @@ pub const ParsedShader = struct {
     }
 };
 
-pub fn parseShader(alloc: std.mem.Allocator, dir: []const u8, source: []const u8) !ParsedShader {
-    var shader_source = try preprocessShaderSource(alloc, dir, source);
+pub fn parseShader(alloc: std.mem.Allocator, io: std.Io, dir: []const u8, source: []const u8) !ParsedShader {
+    var shader_source = try preprocessShaderSource(alloc, io, dir, source);
     defer shader_source.deinit(alloc);
 
     const raw_vertex = try shader_source.vertexCode(alloc);
@@ -1523,7 +1522,7 @@ test "preprocess" {
         \\}
     ;
 
-    const shader_source = try preprocessShaderSource(alloc, "./shaders/blargg/", source);
+    const shader_source = try preprocessShaderSource(alloc, std.testing.io, "./shaders/blargg/", source);
     const common = try std.mem.replaceOwned(u8, alloc, shader_source.common, "\r", "");
     defer alloc.free(common);
 
@@ -1744,7 +1743,7 @@ test "parse_shader" {
         \\config: .{ "ntsc_hue": .{ .option_name: "Hue", .initial: 0, .min: -1, .max: 6.3, step: 0.05 }, "kernel_half": .{ .option_name: "Kernel Half-Size (speed-up)", .initial: 16, .min: 1, .max: 16, step: 1 }, "pi_mod": .{ .option_name: "Phase-Horiz. Angle", .initial: 96, .min: 1, .max: 360, step: 1 }, "vert_scal": .{ .option_name: "Phase-Vertical Scale", .initial: 0.6667, .min: 0, .max: 2, step: 0.05555 }, "ntsc_sat": .{ .option_name: "Saturation", .initial: 2, .min: 0, .max: 6, step: 0.05 }, "afacts": .{ .option_name: "Artifacts", .initial: 0, .min: 0, .max: 1, step: 0.05 }, "fring": .{ .option_name: "Fringing", .initial: 0, .min: 0, .max: 1, step: 0.05 }, "ntsc_bri": .{ .option_name: "Brightness", .initial: 1, .min: 0, .max: 2, step: 0.01 }, "LUMA_CUTOFF": .{ .option_name: "Luma Cutoff", .initial: 0.2, .min: 0, .max: 1, step: 0.005 }, "ntsc_sharp": .{ .option_name: "Sharpness", .initial: 0.1, .min: -1, .max: 1, step: 0.05 }, "ntsc_res": .{ .option_name: "Resolution", .initial: 0, .min: -1, .max: 1, step: 0.05 }, "stat_ph": .{ .option_name: "Dot Crawl On/Off", .initial: 0, .min: 0, .max: 1, step: 1 }, "ntsc_bleed": .{ .option_name: "Chroma Bleed", .initial: 0, .min: -0.75, .max: 2, step: 0.05 }, "dummy": .{ .option_name: "[ System Specific Tweaks]", .initial: 0, .min: 0, .max: 0, step: 0 }, }
     ;
 
-    const shader = try parseShader(alloc, "shaders/blargg/", source);
+    const shader = try parseShader(alloc, std.testing.io, "shaders/blargg/", source);
     const got = try std.mem.replaceOwned(
         u8,
         alloc,
@@ -1781,7 +1780,7 @@ test "parse_shader trims parameter display names" {
         \\void main() { FragColor = vec4(vTexCoord, 0.0, 1.0); }
     ;
 
-    var shader = try parseShader(alloc, ".", source);
+    var shader = try parseShader(alloc, std.testing.io, ".", source);
     defer shader.deinit(alloc);
 
     const config = shader.config.?;

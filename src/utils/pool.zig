@@ -1,10 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Pool = @This();
-const WaitGroup = std.Thread.WaitGroup;
 
-mutex: std.Thread.Mutex = .{},
-cond: std.Thread.Condition = .{},
+io: std.Io,
+mutex: std.Io.Mutex = .init,
+cond: std.Io.Condition = .init,
 run_queue: std.SinglyLinkedList = .{},
 is_running: bool = true,
 allocator: std.mem.Allocator,
@@ -23,8 +23,40 @@ const Runnable = struct {
 
 const RunProto = *const fn (*Runnable, id: ?usize) void;
 
+pub const WaitGroup = struct {
+    io: std.Io,
+    count: std.atomic.Value(usize) = .init(0),
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
+
+    pub fn init(io: std.Io) WaitGroup {
+        return .{ .io = io };
+    }
+
+    pub fn start(self: *WaitGroup) void {
+        _ = self.count.fetchAdd(1, .monotonic);
+    }
+
+    pub fn finish(self: *WaitGroup) void {
+        if (self.count.fetchSub(1, .release) == 1) {
+            self.cond.broadcast(self.io);
+        }
+    }
+
+    pub fn isDone(self: *const WaitGroup) bool {
+        return self.count.load(.acquire) == 0;
+    }
+
+    pub fn wait(self: *WaitGroup) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (!self.isDone()) self.cond.waitUncancelable(self.io, &self.mutex);
+    }
+};
+
 pub const Options = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     n_jobs: ?usize = null,
     track_ids: bool = false,
     stack_size: usize = std.Thread.SpawnConfig.default_stack_size,
@@ -34,6 +66,7 @@ pub fn init(pool: *Pool, options: Options) !void {
     const allocator = options.allocator;
 
     pool.* = .{
+        .io = options.io,
         .allocator = allocator,
         .threads = if (builtin.single_threaded) .{} else &.{},
         .ids = .{},
@@ -75,8 +108,8 @@ fn join(pool: *Pool, spawned: usize) void {
     }
 
     {
-        pool.mutex.lock();
-        defer pool.mutex.unlock();
+        pool.mutex.lockUncancelable(pool.io);
+        defer pool.mutex.unlock(pool.io);
 
         // ensure future worker threads exit the dequeue loop
         pool.is_running = false;
@@ -84,7 +117,7 @@ fn join(pool: *Pool, spawned: usize) void {
 
     // wake up any sleeping threads (this can be done outside the mutex)
     // then wait for all the threads we know are spawned to complete.
-    pool.cond.broadcast();
+    pool.cond.broadcast(pool.io);
     for (pool.threads[0..spawned]) |thread| {
         thread.join();
     }
@@ -107,7 +140,7 @@ fn callFn(f: anytype, args: anytype) void {
                     @call(.auto, f, args) catch |err| {
                         std.log.err("error: {s}\n", .{@errorName(err)});
                         if (@errorReturnTrace()) |trace| {
-                            std.debug.dumpStackTrace(trace.*);
+                            std.debug.dumpErrorReturnTrace(trace);
                         }
                     };
                 },
@@ -152,18 +185,19 @@ pub fn spawnWg(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, args
 
             // The thread pool's allocator is protected by the mutex.
             const mutex = &closure.pool.mutex;
-            mutex.lock();
-            defer mutex.unlock();
+            const io = closure.pool.io;
+            mutex.lockUncancelable(io);
+            defer mutex.unlock(io);
 
             closure.pool.allocator.destroy(closure);
         }
     };
 
     {
-        pool.mutex.lock();
+        pool.mutex.lockUncancelable(pool.io);
 
         const closure = pool.allocator.create(Closure) catch {
-            pool.mutex.unlock();
+            pool.mutex.unlock(pool.io);
             callFn(func, args);
             wait_group.finish();
             return;
@@ -175,11 +209,11 @@ pub fn spawnWg(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, args
         };
 
         pool.run_queue.prepend(&closure.runnable.node);
-        pool.mutex.unlock();
+        pool.mutex.unlock(pool.io);
     }
 
     // Notify waiting threads outside the lock to try and keep the critical section small.
-    pool.cond.signal();
+    pool.cond.signal(pool.io);
 }
 
 /// Runs `func` in the thread pool, calling `WaitGroup.start` beforehand, and
@@ -214,19 +248,20 @@ pub fn spawnWgId(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, ar
 
             // The thread pool's allocator is protected by the mutex.
             const mutex = &closure.pool.mutex;
-            mutex.lock();
-            defer mutex.unlock();
+            const io = closure.pool.io;
+            mutex.lockUncancelable(io);
+            defer mutex.unlock(io);
 
             closure.pool.allocator.destroy(closure);
         }
     };
 
     {
-        pool.mutex.lock();
+        pool.mutex.lockUncancelable(pool.io);
 
         const closure = pool.allocator.create(Closure) catch {
             const id: ?usize = pool.ids.getIndex(std.Thread.getCurrentId());
-            pool.mutex.unlock();
+            pool.mutex.unlock(pool.io);
             callFn(func, .{id.?} ++ args);
             wait_group.finish();
             return;
@@ -238,11 +273,11 @@ pub fn spawnWgId(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, ar
         };
 
         pool.run_queue.prepend(&closure.runnable.node);
-        pool.mutex.unlock();
+        pool.mutex.unlock(pool.io);
     }
 
     // Notify waiting threads outside the lock to try and keep the critical section small.
-    pool.cond.signal();
+    pool.cond.signal(pool.io);
 }
 
 pub fn spawn(pool: *Pool, comptime func: anytype, args: anytype) !void {
@@ -263,16 +298,17 @@ pub fn spawn(pool: *Pool, comptime func: anytype, args: anytype) !void {
 
             // The thread pool's allocator is protected by the mutex.
             const mutex = &closure.pool.mutex;
-            mutex.lock();
-            defer mutex.unlock();
+            const io = closure.pool.io;
+            mutex.lockUncancelable(io);
+            defer mutex.unlock(io);
 
             closure.pool.allocator.destroy(closure);
         }
     };
 
     {
-        pool.mutex.lock();
-        defer pool.mutex.unlock();
+        pool.mutex.lockUncancelable(pool.io);
+        defer pool.mutex.unlock(pool.io);
 
         const closure = try pool.allocator.create(Closure);
         closure.* = .{
@@ -284,7 +320,7 @@ pub fn spawn(pool: *Pool, comptime func: anytype, args: anytype) !void {
     }
 
     // Notify waiting threads outside the lock to try and keep the critical section small.
-    pool.cond.signal();
+    pool.cond.signal(pool.io);
 }
 
 test spawn {
@@ -300,6 +336,7 @@ test spawn {
         var pool: Pool = undefined;
         try pool.init(.{
             .allocator = std.testing.allocator,
+            .io = std.testing.io,
         });
         defer pool.deinit();
         try pool.spawn(TestFn.checkRun, .{&completed});
@@ -309,8 +346,8 @@ test spawn {
 }
 
 fn worker(pool: *Pool) void {
-    pool.mutex.lock();
-    defer pool.mutex.unlock();
+    pool.mutex.lockUncancelable(pool.io);
+    defer pool.mutex.unlock(pool.io);
 
     const id: ?usize = if (pool.ids.count() > 0) @intCast(pool.ids.count()) else null;
     if (id) |_| pool.ids.putAssumeCapacityNoClobber(std.Thread.getCurrentId(), {});
@@ -318,8 +355,8 @@ fn worker(pool: *Pool) void {
     while (true) {
         while (pool.run_queue.popFirst()) |run_node| {
             // Temporarily unlock the mutex in order to execute the run_node
-            pool.mutex.unlock();
-            defer pool.mutex.lock();
+            pool.mutex.unlock(pool.io);
+            defer pool.mutex.lockUncancelable(pool.io);
 
             const runnable: *Runnable = @fieldParentPtr("node", run_node);
             runnable.runFn(runnable, id);
@@ -327,7 +364,7 @@ fn worker(pool: *Pool) void {
 
         // Stop executing instead of waiting if the thread pool is no longer running.
         if (pool.is_running) {
-            pool.cond.wait(&pool.mutex);
+            pool.cond.waitUncancelable(pool.io, &pool.mutex);
         } else {
             break;
         }
@@ -338,16 +375,16 @@ pub fn waitAndWork(pool: *Pool, wait_group: *WaitGroup) void {
     var id: ?usize = null;
 
     while (!wait_group.isDone()) {
-        pool.mutex.lock();
+        pool.mutex.lockUncancelable(pool.io);
         if (pool.run_queue.popFirst()) |run_node| {
             id = id orelse pool.ids.getIndex(std.Thread.getCurrentId());
-            pool.mutex.unlock();
+            pool.mutex.unlock(pool.io);
             const runnable: *Runnable = @fieldParentPtr("node", run_node);
             runnable.runFn(runnable, id);
             continue;
         }
 
-        pool.mutex.unlock();
+        pool.mutex.unlock(pool.io);
         wait_group.wait();
         return;
     }

@@ -7,47 +7,55 @@ const paths = @import("utils/paths.zig");
 const LOG_FILENAME = "NESkwik.log";
 const MAX_LOG_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 
-var mutex: std.Thread.Mutex = .{};
-var log_file: ?std.fs.File = null;
+const LogContext = struct {
+    io: std.Io,
+};
+
+var context: LogContext = .{ .io = undefined };
+var mutex: std.Io.Mutex = .init;
+var log_file: ?std.Io.File = null;
 var log_path: ?[]u8 = null;
 var log_timezone: zeit.TimeZone = zeit.utc;
 
 const FILE_WRITER_BUFFER_SIZE = 1024;
 
-pub fn init(alloc: std.mem.Allocator) !void {
+pub fn init(alloc: std.mem.Allocator, io: std.Io) !void {
     if (log_file != null) return;
 
-    var local_timezone = zeit.local(alloc, null) catch zeit.utc;
+    var local_timezone = zeit.local(alloc, io, .{}) catch zeit.utc;
     errdefer local_timezone.deinit();
 
     const log_dir = try paths.getLogDir(alloc);
     defer alloc.free(log_dir);
 
-    try std.fs.cwd().makePath(log_dir);
+    try std.Io.Dir.cwd().createDirPath(io, log_dir);
 
     const resolved_log_path = try std.fs.path.join(alloc, &.{ log_dir, LOG_FILENAME });
     errdefer alloc.free(resolved_log_path);
 
-    const file = try std.fs.createFileAbsolute(resolved_log_path, .{ .truncate = false });
-    errdefer file.close();
+    const file = try std.Io.Dir.createFileAbsolute(io, resolved_log_path, .{ .truncate = false });
+    errdefer file.close(io);
 
-    const file_size = try file.getEndPos();
+    const file_size = try file.length(io);
     if (file_size > MAX_LOG_FILE_SIZE_BYTES) {
-        try file.setEndPos(0);
-        try file.seekTo(0);
-    } else {
-        try file.seekFromEnd(0);
+        try file.setLength(io, 0);
     }
 
+    var file_writer = file.writerStreaming(io, &.{});
+    try file_writer.seekTo(if (file_size > MAX_LOG_FILE_SIZE_BYTES) 0 else file_size);
+
+    context.io = io;
     log_file = file;
     log_path = resolved_log_path;
     log_timezone = local_timezone;
 }
 
 pub fn deinit(alloc: std.mem.Allocator) void {
+    const io = context.io;
+
     if (log_file) |file| {
-        file.sync() catch {};
-        file.close();
+        file.sync(io) catch {};
+        file.close(io);
         log_file = null;
     }
 
@@ -58,6 +66,7 @@ pub fn deinit(alloc: std.mem.Allocator) void {
 
     log_timezone.deinit();
     log_timezone = zeit.utc;
+    context.io = undefined;
 }
 
 pub fn path() ?[]const u8 {
@@ -66,47 +75,49 @@ pub fn path() ?[]const u8 {
 
 pub fn logFn(
     comptime message_level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
     _ = scope;
 
-    mutex.lock();
-    defer mutex.unlock();
+    const io = context.io;
+
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
 
     if (log_file) |file| {
         var buffer: [FILE_WRITER_BUFFER_SIZE]u8 = undefined;
-        var file_writer = file.writerStreaming(&buffer);
+        var file_writer = file.writerStreaming(io, &buffer);
         const writer = &file_writer.interface;
         writeLog(writer, message_level, format, args) catch {};
         writer.flush() catch {};
     }
 
     if (!builtin.abi.isAndroid()) {
-        std.debug.lockStdErr();
-        defer std.debug.unlockStdErr();
         var stderr_buffer: [FILE_WRITER_BUFFER_SIZE]u8 = undefined;
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
-        const writer = &stderr_writer.interface;
+        const locked_stderr = std.debug.lockStderr(&stderr_buffer);
+        defer std.debug.unlockStderr();
+        const writer = &locked_stderr.file_writer.interface;
         writeLog(writer, message_level, format, args) catch {};
-        writer.flush() catch {};
     }
 }
 
 pub fn writePanic(message: []const u8) void {
-    mutex.lock();
-    defer mutex.unlock();
+    const io = context.io;
+
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
 
     const file = log_file orelse return;
     var buffer: [FILE_WRITER_BUFFER_SIZE]u8 = undefined;
-    var file_writer = file.writerStreaming(&buffer);
+    var file_writer = file.writerStreaming(io, &buffer);
     const writer = &file_writer.interface;
 
     writeTimestamp(writer) catch {};
     writer.print(" [FATAL] {s}\n", .{message}) catch {};
     writer.flush() catch {};
-    file.sync() catch {};
+    file.sync(io) catch {};
 }
 
 fn writeLog(
@@ -121,7 +132,7 @@ fn writeLog(
 }
 
 fn writeTimestamp(writer: *std.Io.Writer) !void {
-    const now = try zeit.instant(.{ .timezone = &log_timezone });
+    const now = zeit.instant(.{ .now = context.io }, &log_timezone);
     try now.time().strftime(writer, "%Y-%m-%d %H:%M:%S");
 }
 

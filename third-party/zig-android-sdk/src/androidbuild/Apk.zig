@@ -188,7 +188,7 @@ pub fn setKeyStore(apk: *Apk, key_store: KeyStore) void {
 pub fn addLibraryFile(apk: *Apk, android_target: androidbuild.AndroidTarget, path: LazyPath) void {
     const b = apk.b;
     apk.precompiled_library_files.append(b.allocator, .{
-        .target = android_target.target(b),
+        .target = android_target.target(b, apk.api_level),
         .path = path,
     }) catch @panic("OOM");
 }

@@ -2059,7 +2059,7 @@ fn drawStateSlotItems(ui: *UI, app_state: *AppState, mode: SaveStateMenuMode) vo
 const FilePickerCallbackData = struct { ui: *UI, app_state: *AppState };
 fn openRomDialog(ui: *UI, app_state: *AppState) void {
     const alloc = app_state.alloc;
-    const default_location = std.process.getCwdAlloc(alloc) catch
+    const default_location = std.process.currentPathAlloc(app_state.io, alloc) catch
         @panic("OOM");
     defer alloc.free(default_location);
 
@@ -3369,7 +3369,7 @@ fn drawShaderPresetRow(ui: *UI, app_state: *AppState) void {
                 app_state.openShaderFilePicker(.main);
             } else {
                 const alloc = app_state.alloc;
-                const default_location = std.process.getCwdAlloc(alloc) catch @panic("OOM");
+                const default_location = std.process.currentPathAlloc(app_state.io, alloc) catch @panic("OOM");
                 defer alloc.free(default_location);
 
                 const default_location_z = alloc.dupeZ(u8, default_location) catch @panic("OOM");

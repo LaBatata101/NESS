@@ -35,7 +35,7 @@ fn handleWindowsResize(userdata: ?*anyopaque, event: [*c]c.SDL_Event) callconv(.
 
 fn androidAndFileLogFn(
     comptime message_level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
@@ -53,30 +53,36 @@ fn SDL_main() callconv(.c) void {
     if (!comptime builtin.abi.isAndroid()) {
         @compileError("SDL_main should not be called outside of Android builds");
     }
-    main() catch |err| {
+
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    defer threaded.deinit();
+
+    appMain(std.heap.smp_allocator, threaded.io(), null) catch |err| {
         std.log.err("{t}", .{err});
         if (@errorReturnTrace()) |trace| {
-            std.debug.dumpStackTrace(trace.*);
+            std.debug.dumpErrorReturnTrace(trace);
         }
     };
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    ness.env.init(init.environ_map);
 
-    logging.init(allocator) catch |err| {
+    var args = try init.minimal.args.iterateAllocator(init.gpa);
+    defer args.deinit();
+
+    try appMain(init.gpa, init.io, &args);
+}
+
+fn appMain(allocator: std.mem.Allocator, io: std.Io, cli_args: ?*std.process.Args.Iterator) !void {
+    logging.init(allocator, io) catch |err| {
         std.debug.print("Failed to initialize log file: {s}\n", .{@errorName(err)});
     };
     defer logging.deinit(allocator);
 
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
-
-    var ui = try UI.init(allocator, "NESkwik", 1280, 720);
+    var ui = try UI.init(allocator, io, "NESkwik", 1280, 720);
     defer ui.deinit();
-    var app_state = gui.AppState.init(allocator, ui);
+    var app_state = gui.AppState.init(allocator, io, ui);
     defer app_state.deinit();
 
     var live_resize_ctx = CallbackParams{ .ui = ui, .app_state = &app_state };
@@ -85,7 +91,7 @@ pub fn main() !void {
 
     ui.setVSync(app_state.settings.vsync);
 
-    if (!builtin.abi.isAndroid()) {
+    if (cli_args) |args| {
         _ = args.skip();
         if (args.next()) |arg0| {
             if (std.mem.eql(u8, arg0, "--debug")) {

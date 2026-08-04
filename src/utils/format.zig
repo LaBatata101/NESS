@@ -25,16 +25,13 @@ pub fn formatPlayTime(secs: u64, alloc: std.mem.Allocator) []const u8 {
     return std.fmt.allocPrint(alloc, "{d}h {d}m", .{ hours, mins_rem }) catch "?";
 }
 
-pub fn formatTimestamp(alloc: std.mem.Allocator, timestamp: i64) [19]u8 {
+pub fn formatTimestamp(alloc: std.mem.Allocator, io: std.Io, timestamp: i64) [19]u8 {
     if (timestamp <= 0) return [_]u8{' '} ** 19;
 
-    var timezone = zeit.local(alloc, null) catch zeit.utc;
+    var timezone = zeit.local(alloc, io, .{}) catch zeit.utc;
     defer timezone.deinit();
 
-    const instant = zeit.instant(.{
-        .source = .{ .unix_timestamp = timestamp },
-        .timezone = &timezone,
-    }) catch return [_]u8{' '} ** 19;
+    const instant = zeit.instant(.{ .unix_timestamp = timestamp }, &timezone);
 
     return formatDateTime(instant.time());
 }

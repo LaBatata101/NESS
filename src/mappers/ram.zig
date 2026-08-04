@@ -93,7 +93,8 @@ pub const VolatileRam = struct {
 
 pub const BatteryBackedRam = struct {
     alloc: std.mem.Allocator,
-    file: std.fs.File,
+    io: std.Io,
+    file: std.Io.File,
     buffer: []u8,
     save_file_path: []u8,
 
@@ -106,18 +107,18 @@ pub const BatteryBackedRam = struct {
         .load_state = @ptrCast(&Self.loadState),
     };
 
-    pub fn init(alloc: std.mem.Allocator, path: []const u8, size: usize) !*Self {
+    pub fn init(alloc: std.mem.Allocator, io: std.Io, path: []const u8, size: usize) !*Self {
         const self = try alloc.create(Self);
 
-        const save_path = try savePath(alloc, path);
-        const file = try std.fs.createFileAbsolute(save_path, .{
+        const save_path = try savePath(alloc, io, path);
+        const file = try std.Io.Dir.createFileAbsolute(io, save_path, .{
             .read = true,
             .truncate = false,
         });
 
-        const stat = try file.stat();
+        const stat = try file.stat(io);
         if (stat.size < size) {
-            try file.setEndPos(size);
+            try file.setLength(io, size);
         }
 
         const buffer = try mmap(&file, size);
@@ -125,6 +126,7 @@ pub const BatteryBackedRam = struct {
 
         self.* = .{
             .alloc = alloc,
+            .io = io,
             .file = file,
             .buffer = buffer,
             .save_file_path = save_path,
@@ -134,7 +136,7 @@ pub const BatteryBackedRam = struct {
 
     fn deinit(self: *Self) void {
         munmap(self.buffer);
-        self.file.close();
+        self.file.close(self.io);
         self.alloc.free(self.save_file_path);
         self.alloc.destroy(self);
     }
@@ -160,21 +162,21 @@ pub const BatteryBackedRam = struct {
         return .{ .ptr = self, .vtable = &VTable };
     }
 
-    fn savePath(alloc: std.mem.Allocator, rom_path: []const u8) ![]u8 {
+    fn savePath(alloc: std.mem.Allocator, io: std.Io, rom_path: []const u8) ![]u8 {
         if (builtin.abi.isAndroid()) {
             const data_dir_path = try paths.getDataDir(alloc);
             defer alloc.free(data_dir_path);
 
-            std.fs.makeDirAbsolute(data_dir_path) catch |err| switch (err) {
+            std.Io.Dir.createDirAbsolute(io, data_dir_path, .default_dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
                 else => return err,
             };
 
-            var data_dir = try std.fs.openDirAbsolute(data_dir_path, .{});
-            defer data_dir.close();
+            var data_dir = try std.Io.Dir.openDirAbsolute(io, data_dir_path, .{});
+            defer data_dir.close(io);
 
             // Ensure <data-dir>/neskwik/save-files exists.
-            data_dir.makeDir("save-files") catch |err| switch (err) {
+            data_dir.createDir(io, "save-files", .default_dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
                 else => return err,
             };

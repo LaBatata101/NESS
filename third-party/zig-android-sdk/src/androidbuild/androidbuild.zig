@@ -62,7 +62,7 @@ pub const AndroidTarget = enum {
     x86_64,
     x86,
 
-    pub fn target(at: AndroidTarget, b: *std.Build) ResolvedTarget {
+    pub fn target(at: AndroidTarget, b: *std.Build, api_level: ApiLevel) ResolvedTarget {
         const android_target_query: AndroidTargetQuery = switch (at) {
             .arm64_v8a => .{
                 // aarch64-linux-android
@@ -83,7 +83,7 @@ pub const AndroidTarget = enum {
                 .cpu_arch = .x86,
             },
         };
-        return b.resolveTargetQuery(android_target_query.queryTarget());
+        return b.resolveTargetQuery(android_target_query.queryTarget(api_level));
     }
 
     /// The "lib/{AndroidTarget}" directory name as it appears in an APK
@@ -102,7 +102,7 @@ pub const AndroidTarget = enum {
 /// - If -Dtarget=aarch64-linux-android, return a slice with the one specified Android target
 ///
 /// If none of the above, then return a zero length slice.
-pub fn standardTargets(b: *std.Build, target: ResolvedTarget) []ResolvedTarget {
+pub fn standardTargets(b: *std.Build, target: ResolvedTarget, api_level: ApiLevel) []ResolvedTarget {
     // NOTE(jae): 2026-04-11
     // Seperated logic into "resolveTargets" so that consumers of this library can create this option themselves and use "b.lazyImport"
     // See: https://github.com/silbinarywolf/zig-android-sdk/pull/82
@@ -111,6 +111,7 @@ pub fn standardTargets(b: *std.Build, target: ResolvedTarget) []ResolvedTarget {
     return resolveTargets(b, .{
         .default_target = target,
         .all_targets = all_targets,
+        .api_level = api_level,
     });
 }
 
@@ -119,19 +120,24 @@ pub const ResolveTargetOptions = struct {
     default_target: ResolvedTarget,
     /// If true, then retrieve all Android targets rather than using the default target
     all_targets: bool,
+    /// Android API level used to version the resolved target triples
+    api_level: ApiLevel,
 
-    /// Shorthand to query all Android targets
-    pub const all: ResolveTargetOptions = .{
-        .default_target = undefined,
-        .all_targets = true,
-    };
+    /// Shorthand to query all Android targets at a specific API level
+    pub fn all(api_level: ApiLevel) ResolveTargetOptions {
+        return .{
+            .default_target = undefined,
+            .all_targets = true,
+            .api_level = api_level,
+        };
+    }
 };
 
 /// Will return a slice of Android targets depending on the options given.
 /// Avoids setting up options
 pub fn resolveTargets(b: *std.Build, options: ResolveTargetOptions) []ResolvedTarget {
     if (options.all_targets) {
-        return getAllAndroidTargets(b);
+        return getAllAndroidTargets(b, options.api_level);
     }
     const target = options.default_target;
     if (!target.result.abi.isAndroid()) {
@@ -144,7 +150,7 @@ pub fn resolveTargets(b: *std.Build, options: ResolveTargetOptions) []ResolvedTa
     for (supported_android_targets) |android_target| {
         if (target.result.cpu.arch == android_target.cpu_arch) {
             const resolved_targets = b.allocator.alloc(ResolvedTarget, 1) catch @panic("OOM");
-            resolved_targets[0] = b.resolveTargetQuery(android_target.queryTarget());
+            resolved_targets[0] = b.resolveTargetQuery(android_target.queryTarget(options.api_level));
             return resolved_targets;
         }
     }
@@ -175,10 +181,10 @@ pub fn getTargetLibDir(b: *std.Build, target: ResolvedTarget) []const u8 {
     };
 }
 
-fn getAllAndroidTargets(b: *std.Build) []ResolvedTarget {
+fn getAllAndroidTargets(b: *std.Build, api_level: ApiLevel) []ResolvedTarget {
     const resolved_targets = b.allocator.alloc(ResolvedTarget, supported_android_targets.len) catch @panic("OOM");
     for (supported_android_targets, 0..) |android_target, i| {
-        const resolved_target = b.resolveTargetQuery(android_target.queryTarget());
+        const resolved_target = b.resolveTargetQuery(android_target.queryTarget(api_level));
         resolved_targets[i] = resolved_target;
     }
     return resolved_targets;
@@ -247,16 +253,15 @@ const AndroidTargetQuery = struct {
     cpu_arch: Target.Cpu.Arch,
     cpu_features_add: Target.Cpu.Feature.Set = Target.Cpu.Feature.Set.empty,
 
-    fn queryTarget(android_target: AndroidTargetQuery) Target.Query {
+    fn queryTarget(android_target: AndroidTargetQuery, api_level: ApiLevel) Target.Query {
+        std.debug.assert(api_level != .none);
         return .{
             .os_tag = .linux,
             .cpu_model = .baseline,
             .abi = if (android_target.cpu_arch != .arm) .android else .androideabi,
             .cpu_arch = android_target.cpu_arch,
             .cpu_features_add = android_target.cpu_features_add,
-            // TODO(jae): 2025-05-11
-            // Setup Android API Level for Zig 0.14.0+
-            // .android_api_level = null,
+            .android_api_level = @intFromEnum(api_level),
         };
     }
 };

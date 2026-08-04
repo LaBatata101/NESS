@@ -69,7 +69,7 @@ pub const Mapper1 = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, params: MapperParams) !*Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, params: MapperParams) !*Self {
         const self = try allocator.create(Self);
 
         const chr_is_ram = params.chr_rom.len == 0;
@@ -82,7 +82,7 @@ pub const Mapper1 = struct {
         }
 
         const prg_ram = if (params.has_battery_backed_ram)
-            (try BatteryBackedRam.init(allocator, params.rom_path, params.prg_ram_size)).as_ram()
+            (try BatteryBackedRam.init(allocator, io, params.rom_path, params.prg_ram_size)).as_ram()
         else
             (try VolatileRam.init(allocator, params.prg_ram_size)).as_ram();
 
@@ -318,7 +318,7 @@ test "Mapper1 initialization" {
     defer allocator.free(chr_rom);
     @memset(chr_rom, 0);
 
-    var mapper = try Mapper1.init(allocator, .{
+    var mapper = try Mapper1.init(allocator, std.testing.io, .{
         .prg_rom = prg_rom,
         .chr_rom = chr_rom,
         .prg_rom_banks = 16,
@@ -345,7 +345,7 @@ test "Mapper1 shift register write sequence" {
     defer allocator.free(chr_rom);
     @memset(chr_rom, 0);
 
-    var mapper = try Mapper1.init(allocator, .{
+    var mapper = try Mapper1.init(allocator, std.testing.io, .{
         .prg_rom = prg_rom,
         .chr_rom = chr_rom,
         .prg_rom_banks = 2,
@@ -379,7 +379,7 @@ test "Mapper1 reset with bit 7" {
     defer allocator.free(chr_rom);
     @memset(chr_rom, 0);
 
-    var mapper = try Mapper1.init(allocator, .{
+    var mapper = try Mapper1.init(allocator, std.testing.io, .{
         .prg_rom = prg_rom,
         .chr_rom = chr_rom,
         .prg_rom_banks = 2,
@@ -420,7 +420,7 @@ test "Mapper1 PRG banking mode 3" {
     defer allocator.free(chr_rom);
     @memset(chr_rom, 0);
 
-    var mapper = try Mapper1.init(allocator, .{
+    var mapper = try Mapper1.init(allocator, std.testing.io, .{
         .prg_rom = prg_rom,
         .chr_rom = chr_rom,
         .prg_rom_banks = 4,
@@ -460,7 +460,7 @@ test "Mapper1 CHR banking" {
         @memset(chr_rom[bank_start..bank_end], @as(u8, @truncate(bank)));
     }
 
-    var mapper = try Mapper1.init(allocator, .{
+    var mapper = try Mapper1.init(allocator, std.testing.io, .{
         .prg_rom = prg_rom,
         .chr_rom = chr_rom,
         .prg_rom_banks = 2,

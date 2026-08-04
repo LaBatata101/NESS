@@ -24,34 +24,34 @@ pub const SlotInfo = struct {
     display_time: [19]u8 = [_]u8{' '} ** 19,
 };
 
-pub fn saveSlot(alloc: std.mem.Allocator, rom_name: []const u8, system: *System, slot: usize) !SlotInfo {
+pub fn saveSlot(alloc: std.mem.Allocator, io: std.Io, rom_name: []const u8, system: *System, slot: usize) !SlotInfo {
     std.debug.assert(slot <= SLOT_COUNT);
 
-    var state_dir = try openStateDir(alloc, rom_name);
-    defer state_dir.close();
+    var state_dir = try openStateDir(alloc, io, rom_name);
+    defer state_dir.close(io);
 
     const slot_filename = try std.fmt.allocPrint(alloc, "slot-{}.{s}", .{ slot + 1, EXT });
     defer alloc.free(slot_filename);
 
-    const file = try state_dir.createFile(slot_filename, .{});
-    defer file.close();
+    const file = try state_dir.createFile(io, slot_filename, .{});
+    defer file.close(io);
 
     var snapshot = try system.saveState(alloc);
     defer snapshot.deinit(alloc);
 
-    snapshot.saved_at = (try zeit.instant(.{})).unixTimestamp();
+    snapshot.saved_at = zeit.instant(.{ .now = io }, &zeit.utc).unixTimestamp();
 
-    try writeSnapshot(alloc, file, &snapshot);
-    return .{ .display_time = utils.formatTimestamp(alloc, snapshot.saved_at) };
+    try writeSnapshot(alloc, io, file, &snapshot);
+    return .{ .display_time = utils.formatTimestamp(alloc, io, snapshot.saved_at) };
 }
 
-pub fn loadSlot(alloc: std.mem.Allocator, rom_name: []const u8, system: *System, slot: usize) !void {
+pub fn loadSlot(alloc: std.mem.Allocator, io: std.Io, rom_name: []const u8, system: *System, slot: usize) !void {
     std.debug.assert(slot < SLOT_COUNT);
 
-    const file = try openStateFile(alloc, rom_name, slot);
-    defer file.close();
+    const file = try openStateFile(alloc, io, rom_name, slot);
+    defer file.close(io);
 
-    const snapshot = try readSnapshot(alloc, file);
+    const snapshot = try readSnapshot(alloc, io, file);
     defer {
         snapshot.deinit(alloc);
         alloc.destroy(snapshot);
@@ -60,18 +60,18 @@ pub fn loadSlot(alloc: std.mem.Allocator, rom_name: []const u8, system: *System,
     try system.loadState(snapshot);
 }
 
-pub fn slotInfo(alloc: std.mem.Allocator, rom_name: []const u8, slot: usize) !SlotInfo {
+pub fn slotInfo(alloc: std.mem.Allocator, io: std.Io, rom_name: []const u8, slot: usize) !SlotInfo {
     std.debug.assert(slot < SLOT_COUNT);
 
-    const file = try openStateFile(alloc, rom_name, slot);
-    defer file.close();
+    const file = try openStateFile(alloc, io, rom_name, slot);
+    defer file.close(io);
 
-    return .{ .display_time = utils.formatTimestamp(alloc, try readHeaderTimestamp(file)) };
+    return .{ .display_time = utils.formatTimestamp(alloc, io, try readHeaderTimestamp(io, file)) };
 }
 
-fn writeSnapshot(alloc: std.mem.Allocator, file: std.fs.File, snapshot: *const System.Snapshot) !void {
+fn writeSnapshot(alloc: std.mem.Allocator, io: std.Io, file: std.Io.File, snapshot: *const System.Snapshot) !void {
     var file_buffer: [4096]u8 = undefined;
-    var file_writer = file.writer(&file_buffer);
+    var file_writer = file.writer(io, &file_buffer);
     const writer = &file_writer.interface;
 
     try writer.writeAll(&MAGIC);
@@ -95,9 +95,9 @@ fn writeSnapshot(alloc: std.mem.Allocator, file: std.fs.File, snapshot: *const S
     try writer.flush();
 }
 
-fn readSnapshot(alloc: std.mem.Allocator, file: std.fs.File) !*System.Snapshot {
+fn readSnapshot(alloc: std.mem.Allocator, io: std.Io, file: std.Io.File) !*System.Snapshot {
     var file_buffer: [4096]u8 = undefined;
-    var file_reader = file.reader(&file_buffer);
+    var file_reader = file.reader(io, &file_buffer);
     const reader = &file_reader.interface;
 
     const header = try readHeader(reader);
@@ -137,9 +137,9 @@ fn readHeader(reader: *std.Io.Reader) !Header {
     };
 }
 
-fn readHeaderTimestamp(file: std.fs.File) !i64 {
+fn readHeaderTimestamp(io: std.Io, file: std.Io.File) !i64 {
     var file_buffer: [32]u8 = undefined;
-    var file_reader = file.reader(&file_buffer);
+    var file_reader = file.reader(io, &file_buffer);
     return (try readHeader(&file_reader.interface)).saved_at;
 }
 
@@ -339,40 +339,40 @@ fn decompressBytes(alloc: std.mem.Allocator, compressed: []const u8, expected_le
     return output;
 }
 
-fn openStateDir(alloc: std.mem.Allocator, rom_name: []const u8) !std.fs.Dir {
+fn openStateDir(alloc: std.mem.Allocator, io: std.Io, rom_name: []const u8) !std.Io.Dir {
     const data_dir_path = try paths.getDataDir(alloc);
     defer alloc.free(data_dir_path);
 
-    std.fs.makeDirAbsolute(data_dir_path) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(io, data_dir_path, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    var data_dir = try std.fs.openDirAbsolute(data_dir_path, .{});
-    defer data_dir.close();
+    var data_dir = try std.Io.Dir.openDirAbsolute(io, data_dir_path, .{});
+    defer data_dir.close(io);
 
-    data_dir.makeDir(STATE_DIR_NAME) catch |err| switch (err) {
+    data_dir.createDir(io, STATE_DIR_NAME, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    var state_dir = try data_dir.openDir(STATE_DIR_NAME, .{});
-    defer state_dir.close();
+    var state_dir = try data_dir.openDir(io, STATE_DIR_NAME, .{});
+    defer state_dir.close(io);
 
-    state_dir.makeDir(rom_name) catch |err| switch (err) {
+    state_dir.createDir(io, rom_name, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    return try state_dir.openDir(rom_name, .{});
+    return try state_dir.openDir(io, rom_name, .{});
 }
 
-fn openStateFile(alloc: std.mem.Allocator, rom_name: []const u8, slot: usize) !std.fs.File {
-    var state_dir = try openStateDir(alloc, rom_name);
-    defer state_dir.close();
+fn openStateFile(alloc: std.mem.Allocator, io: std.Io, rom_name: []const u8, slot: usize) !std.Io.File {
+    var state_dir = try openStateDir(alloc, io, rom_name);
+    defer state_dir.close(io);
 
     const slot_filename = try std.fmt.allocPrint(alloc, "slot-{}.{s}", .{ slot + 1, EXT });
     defer alloc.free(slot_filename);
 
-    return try state_dir.openFile(slot_filename, .{});
+    return try state_dir.openFile(io, slot_filename, .{});
 }

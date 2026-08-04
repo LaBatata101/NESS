@@ -25,16 +25,18 @@ pub const GameEntry = struct {
 
 pub const GameHistory = struct {
     alloc: std.mem.Allocator,
+    io: std.Io,
     entries: std.ArrayList(GameEntry),
     data_dir: ?[]u8, // null when the OS data dir is unavailable
 
     const HISTORY_SUBDIR = "history";
 
-    pub fn init(alloc: std.mem.Allocator) GameHistory {
+    pub fn init(alloc: std.mem.Allocator, io: std.Io) GameHistory {
         const data_dir = paths.getDataDir(alloc) catch null;
         return .{
             .alloc = alloc,
-            .entries = .{},
+            .io = io,
+            .entries = .empty,
             .data_dir = data_dir,
         };
     }
@@ -65,17 +67,15 @@ pub const GameHistory = struct {
         const data_dir_path = self.data_dir orelse return;
         const hist_dir_path = try std.fs.path.join(alloc, &.{ data_dir_path, HISTORY_SUBDIR });
 
-        var hist_dir = std.fs.openDirAbsolute(hist_dir_path, .{ .iterate = true }) catch return;
-        defer hist_dir.close();
+        var hist_dir = std.Io.Dir.openDirAbsolute(self.io, hist_dir_path, .{ .iterate = true }) catch return;
+        defer hist_dir.close(self.io);
 
         var it = hist_dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(self.io)) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
 
             const stem = entry.name[0 .. entry.name.len - ".json".len];
-            const json_file = hist_dir.openFile(entry.name, .{}) catch continue;
-            defer json_file.close();
-            const json_bytes = json_file.readToEndAlloc(alloc, 64 * 1024) catch continue;
+            const json_bytes = hist_dir.readFileAlloc(self.io, entry.name, alloc, .limited(64 * 1024)) catch continue;
 
             const Meta = struct {
                 name: []const u8,
@@ -113,7 +113,8 @@ pub const GameHistory = struct {
         play_time_secs: u64,
         pixels: []const u8,
     ) void {
-        self.saveImpl(name, rom_path, play_time_secs, std.time.timestamp(), pixels) catch |err|
+        const now = std.Io.Timestamp.now(self.io, .real).toSeconds();
+        self.saveImpl(name, rom_path, play_time_secs, now, pixels) catch |err|
             std.log.err("game history save failed: {any}", .{err});
     }
 
@@ -132,22 +133,22 @@ pub const GameHistory = struct {
         const data_dir_path = self.data_dir orelse return error.DataDirUnavailable;
         const hist_dir_path = try std.fs.path.join(alloc, &.{ data_dir_path, HISTORY_SUBDIR });
 
-        std.fs.makeDirAbsolute(data_dir_path) catch |err| switch (err) {
+        std.Io.Dir.createDirAbsolute(self.io, data_dir_path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
-        var data_dir = try std.fs.openDirAbsolute(data_dir_path, .{});
-        defer data_dir.close();
+        var data_dir = try std.Io.Dir.openDirAbsolute(self.io, data_dir_path, .{});
+        defer data_dir.close(self.io);
 
         // Ensure <data-dir>/neskwik/history exists.
-        data_dir.makeDir(HISTORY_SUBDIR) catch |err| switch (err) {
+        data_dir.createDir(self.io, HISTORY_SUBDIR, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
-        var hist_dir = try data_dir.openDir(HISTORY_SUBDIR, .{});
-        defer hist_dir.close();
+        var hist_dir = try data_dir.openDir(self.io, HISTORY_SUBDIR, .{});
+        defer hist_dir.close(self.io);
 
         // Write metadata JSON.
         {
@@ -158,9 +159,9 @@ pub const GameHistory = struct {
                 .play_time_secs = play_time_secs,
                 .last_played = last_played,
             }, .{});
-            const f = try hist_dir.createFile(json_name, .{});
-            defer f.close();
-            try f.writeAll(json_bytes);
+            const f = try hist_dir.createFile(self.io, json_name, .{});
+            defer f.close(self.io);
+            try f.writeStreamingAll(self.io, json_bytes);
         }
 
         // Write thumbnail PNG.

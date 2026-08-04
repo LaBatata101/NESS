@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 env:
-  ZIG_VERSION: 0.15.2
+  ZIG_VERSION: 0.16.0
   RUST_VERSION: 1.91.0
 
 jobs:
@@ -25,13 +25,10 @@ jobs:
         include:
           - name: Linux
             os: ubuntu-latest
-            target_arg: ""
           - name: Windows
             os: windows-latest
-            target_arg: -Dtarget=x86_64-windows-gnu
-#          - name: macOS
-#            os: macos-latest
-#            target_arg: ""
+          - name: macOS
+            os: macos-latest
 
     steps:
       - name: Checkout

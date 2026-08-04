@@ -43,7 +43,7 @@ pub fn stateFromInt(value: u8) State {
     };
 }
 
-pub fn downloadAndExtract(root_path: []const u8, progress: Progress) !void {
+pub fn downloadAndExtract(io: std.Io, root_path: []const u8, progress: Progress) !void {
     const alloc = std.heap.smp_allocator;
     const parent_dir = std.fs.path.dirname(root_path) orelse return error.InvalidShaderPath;
     const zip_path = try std.fs.path.join(alloc, &.{ parent_dir, zip_file_name });
@@ -51,25 +51,25 @@ pub fn downloadAndExtract(root_path: []const u8, progress: Progress) !void {
     const extracted_root = try std.fs.path.join(alloc, &.{ parent_dir, archive_root_dir_name });
     defer alloc.free(extracted_root);
 
-    try std.fs.cwd().makePath(parent_dir);
-    deleteFileIfExists(zip_path) catch |err|
+    try std.Io.Dir.cwd().createDirPath(io, parent_dir);
+    deleteFileIfExists(io, zip_path) catch |err|
         std.log.warn("failed to remove old shader zip '{s}': {s}", .{ zip_path, @errorName(err) });
-    deleteTreeIfExists(extracted_root) catch |err|
+    deleteTreeIfExists(io, extracted_root) catch |err|
         std.log.warn("failed to remove old shader archive dir '{s}': {s}", .{ extracted_root, @errorName(err) });
-    errdefer deleteFileIfExists(zip_path) catch {};
-    errdefer deleteTreeIfExists(extracted_root) catch {};
+    errdefer deleteFileIfExists(io, zip_path) catch {};
+    errdefer deleteTreeIfExists(io, extracted_root) catch {};
 
     progress.setState(.downloading);
     progress.setProgress(0, unknown_total);
-    try downloadZip(zip_path, progress);
+    try downloadZip(io, zip_path, progress);
 
     progress.setState(.extracting);
-    try extractZip(zip_path, parent_dir);
+    try extractZip(io, zip_path, parent_dir);
 
-    deleteTreeIfExists(root_path) catch |err|
+    deleteTreeIfExists(io, root_path) catch |err|
         std.log.warn("failed to remove old shader dir '{s}': {s}", .{ root_path, @errorName(err) });
-    try std.fs.renameAbsolute(extracted_root, root_path);
-    deleteFileIfExists(zip_path) catch {};
+    try std.Io.Dir.renameAbsolute(extracted_root, root_path, io);
+    deleteFileIfExists(io, zip_path) catch {};
 
     progress.setState(.done);
     const bytes = progress.bytes.load(.acquire);
@@ -78,8 +78,11 @@ pub fn downloadAndExtract(root_path: []const u8, progress: Progress) !void {
     }
 }
 
-fn downloadZip(zip_path: []const u8, progress: Progress) !void {
-    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator };
+fn downloadZip(io: std.Io, zip_path: []const u8, progress: Progress) !void {
+    var client: std.http.Client = .{
+        .allocator = std.heap.smp_allocator,
+        .io = io,
+    };
     defer client.deinit();
 
     const uri = try std.Uri.parse(url);
@@ -95,11 +98,11 @@ fn downloadZip(zip_path: []const u8, progress: Progress) !void {
     const total = response.head.content_length orelse unknown_total;
     progress.total_bytes.store(total, .release);
 
-    const file = try std.fs.createFileAbsolute(zip_path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.createFileAbsolute(io, zip_path, .{});
+    defer file.close(io);
 
     var file_buffer: [64 * 1024]u8 = undefined;
-    var writer = file.writer(&file_buffer);
+    var writer = file.writer(io, &file_buffer);
     defer writer.interface.flush() catch {};
 
     var transfer_buffer: [64 * 1024]u8 = undefined;
@@ -120,30 +123,27 @@ fn downloadZip(zip_path: []const u8, progress: Progress) !void {
     try writer.interface.flush();
 }
 
-fn extractZip(zip_path: []const u8, dest_dir: []const u8) !void {
-    try std.fs.cwd().makePath(dest_dir);
+fn extractZip(io: std.Io, zip_path: []const u8, dest_dir: []const u8) !void {
+    try std.Io.Dir.cwd().createDirPath(io, dest_dir);
 
-    const file = try std.fs.openFileAbsolute(zip_path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.openFileAbsolute(io, zip_path, .{});
+    defer file.close(io);
 
     var reader_buffer: [64 * 1024]u8 = undefined;
-    var reader = file.reader(&reader_buffer);
+    var reader = file.reader(io, &reader_buffer);
 
-    var dest = try std.fs.openDirAbsolute(dest_dir, .{});
-    defer dest.close();
+    var dest = try std.Io.Dir.openDirAbsolute(io, dest_dir, .{});
+    defer dest.close(io);
 
     try std.zip.extract(dest, &reader, .{});
 }
 
-fn deleteTreeIfExists(path: []const u8) !void {
-    std.fs.deleteTreeAbsolute(path) catch |err| switch (err) {
-        error.FileNotFound => return,
-        else => return err,
-    };
+fn deleteTreeIfExists(io: std.Io, path: []const u8) !void {
+    try std.Io.Dir.cwd().deleteTree(io, path);
 }
 
-fn deleteFileIfExists(path: []const u8) !void {
-    std.fs.deleteFileAbsolute(path) catch |err| switch (err) {
+fn deleteFileIfExists(io: std.Io, path: []const u8) !void {
+    std.Io.Dir.deleteFileAbsolute(io, path) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };

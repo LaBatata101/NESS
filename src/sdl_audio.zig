@@ -17,9 +17,10 @@ const BufferOut = struct {
 };
 
 pub const SDLAudioOut = struct {
+    io: std.Io,
     buffer: BufferOut,
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
+    mutex: std.Io.Mutex,
+    cond: std.Io.Condition,
     stream: *c.SDL_AudioStream,
     // To disable the audio output when running the test ROMs from CLI.
     disable: bool = false,
@@ -32,11 +33,12 @@ pub const SDLAudioOut = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator) !*Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
         self.* = .{
+            .io = io,
             .buffer = .{
                 .samples = [_]Sample{0} ** BUFFER_SIZE,
                 .input_counter = 0,
@@ -44,8 +46,8 @@ pub const SDLAudioOut = struct {
                 .input_samples = 0,
                 .too_slow = false,
             },
-            .mutex = .{},
-            .cond = .{},
+            .mutex = .init,
+            .cond = .init,
             .stream = undefined,
         };
 
@@ -75,8 +77,8 @@ pub const SDLAudioOut = struct {
         if (self.current_speed == speed) return;
         self.current_speed = speed;
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         // Flush any stale samples so the callback doesn't play them at the
         // new rate and produce a pitch glitch.
@@ -108,22 +110,22 @@ pub const SDLAudioOut = struct {
 
         // Wake a producer that may already be waiting for space so it can
         // observe the new policy immediately.
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.cond.broadcast();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.cond.broadcast(self.io);
     }
 
     pub fn play(self: *Self, buffer: []const Sample) void {
         if (self.disable) return;
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         while (!self.paused.load(.acquire) and
             self.producer_blocking.load(.acquire) and
             self.buffer.input_samples + buffer.len > BUFFER_SIZE)
         {
-            self.cond.wait(&self.mutex);
+            self.cond.waitUncancelable(self.io, &self.mutex);
         }
 
         if (self.paused.load(.acquire) or
@@ -161,13 +163,13 @@ pub const SDLAudioOut = struct {
 
     fn clearQueuedSamples(self: *Self) void {
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
 
             self.buffer.input_samples = 0;
             self.buffer.input_counter = self.buffer.playback_counter;
             self.buffer.too_slow = false;
-            self.cond.signal();
+            self.cond.signal(self.io);
         }
         _ = c.SDL_ClearAudioStream(self.stream);
     }
@@ -183,8 +185,8 @@ fn audio_stream_callback(
     const stream: *c.SDL_AudioStream = @ptrCast(stream_arg.?);
     const this: *SDLAudioOut = @ptrCast(@alignCast(userdata.?));
 
-    this.mutex.lock();
-    defer this.mutex.unlock();
+    this.mutex.lockUncancelable(this.io);
+    defer this.mutex.unlock(this.io);
 
     const sample_size: usize = @sizeOf(Sample);
     const total_bytes = total_amount;
@@ -224,5 +226,5 @@ fn audio_stream_callback(
         this.buffer.input_counter = this.buffer.playback_counter;
     }
 
-    this.cond.signal();
+    this.cond.signal(this.io);
 }

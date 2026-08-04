@@ -6,7 +6,8 @@ pub fn build(b: *std.Build) void {
     const exe_name: []const u8 = "sdl-zig-demo";
     const root_target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const android_targets = android.standardTargets(b, root_target);
+    const android_api_level: android.ApiLevel = .android15;
+    const android_targets = android.standardTargets(b, root_target, android_api_level);
 
     const crash_on_exception = b.option(bool, "crash-on-exception", "if true then we'll use the activity from androidCrashTest folder") orelse false;
 
@@ -22,7 +23,7 @@ pub fn build(b: *std.Build) void {
         const android_sdk = android.Sdk.create(b, .{});
         const apk = android_sdk.createApk(.{
             .name = exe_name,
-            .api_level = .android15,
+            .api_level = android_api_level,
             .build_tools_version = "36.1.0",
             .ndk_version = "29.0.14206865",
         });

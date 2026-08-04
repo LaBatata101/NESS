@@ -12,6 +12,7 @@ pub const netplay_protocol = @import("netplay/protocol.zig");
 pub const netplay_snapshot = @import("netplay/snapshot.zig");
 pub const save_state = @import("save_state.zig");
 pub const netplay_session = @import("netplay/session.zig");
+pub const env = @import("env.zig");
 
 pub const customPanic = @import("utils/panic.zig").customPanic;
 

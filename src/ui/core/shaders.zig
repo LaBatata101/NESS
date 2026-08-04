@@ -134,6 +134,7 @@ fn get_spirv_version(vk_version: c_uint) c_uint {
 
 pub const ShaderCompiler = struct {
     alloc: std.mem.Allocator,
+    io: std.Io,
     shaders: std.ArrayList(Shader),
 
     const Self = @This();
@@ -142,9 +143,10 @@ pub const ShaderCompiler = struct {
         stage: Shader.Stage,
     };
 
-    pub fn init(alloc: std.mem.Allocator) !Self {
+    pub fn init(alloc: std.mem.Allocator, io: std.Io) !Self {
         const self: Self = .{
             .alloc = alloc,
+            .io = io,
             .shaders = .empty,
         };
         return self;
@@ -167,10 +169,10 @@ pub const ShaderCompiler = struct {
 
         var pool: ThreadPool = undefined;
         defer pool.deinit();
-        try pool.init(.{ .allocator = self.alloc, .n_jobs = std.Thread.getCpuCount() catch 4 });
+        try pool.init(.{ .allocator = self.alloc, .io = self.io, .n_jobs = std.Thread.getCpuCount() catch 4 });
 
-        var wg: std.Thread.WaitGroup = .{};
-        var mutex: std.Thread.Mutex = .{};
+        var wg = ThreadPool.WaitGroup.init(self.io);
+        var mutex: std.Io.Mutex = .init;
         for (self.shaders.items) |shader| {
             pool.spawnWg(&wg, worker, .{ self, shader, vulkan_version, &result, &mutex });
         }
@@ -184,7 +186,7 @@ pub const ShaderCompiler = struct {
         shader: Shader,
         vulkan_version: c_uint,
         result: *std.ArrayList(SpirV),
-        mutex: *std.Thread.Mutex,
+        mutex: *std.Io.Mutex,
     ) !void {
         const source_z = try self.alloc.dupeZ(u8, shader.source());
         defer self.alloc.free(source_z);
@@ -258,8 +260,8 @@ pub const ShaderCompiler = struct {
 
         const spirv = try self.alloc.dupe(u8, std.mem.sliceAsBytes(ptr[0..size]));
 
-        mutex.lock();
-        defer mutex.unlock();
+        mutex.lockUncancelable(self.io);
+        defer mutex.unlock(self.io);
 
         try result.append(self.alloc, .{ .bytes = spirv, .stage = shader.stage });
     }

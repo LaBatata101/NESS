@@ -8,24 +8,24 @@
             .path = "third-party/SDL/",
         },
         .font_raster = .{
-            .url = "git+https://github.com/LaBatata101/zig-font-raster.git#e81222a22b5784ee89bad9693ac6901c4e6b92fe",
-            .hash = "zig_font_raster-0.1.0-UGqisuknDwBrotXkkwSpQ3UQjJqDOlmu3wajYhukoFkX",
+            .url = "git+https://github.com/LaBatata101/zig-font-raster.git#4588a27af0ef9d8612812756f54221054c87dd92",
+            .hash = "zig_font_raster-0.1.0-UGqissN4VgFeoaSB0N0068MGPZfSOsBS9STO4Ozu_mER",
         },
         .spirv_cross = .{
             .url = "git+https://github.com/LaBatata101/SPIRV-Cross_zig.git#ad0bb016f3ddc68f666e7e2a955889b171d8f2a9",
             .hash = "spirv_cross-0.0.0-B6t46LYaAABm291XHgbnkHVM6Q4y7vepSozio5t0MsHO",
         },
         .glslang = .{
-            .url = "git+https://github.com/LaBatata101/glslang-zig.git#a988e785389ea0793edd8577c31265d2331a14f0",
-            .hash = "glslang-1.4.309-eMn68EfFCQCgFuy69YWlg9uFFt1L0ItlefOsrk-BIMQe",
+            .url = "git+https://github.com/LaBatata101/glslang-zig.git#c357e10eff72217d319d3d6c33fd2df04a154bd4",
+            .hash = "glslang-1.4.309-eMn68K7KCQCePZWefwSu3k3UkUSatAgwJr7q_PV9-oNL",
         },
         .vulkan_headers = .{
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.338.tar.gz",
             .hash = "N-V-__8AAMZuLQIcPe--JSv0kn_Ga8tsjgbkaojW0OHW2Rfd",
         },
         .zeit = .{
-            .url = "git+https://github.com/rockorager/zeit.git#74be5a2afb346b2a6a6349abbb609e89ec7e65a6",
-            .hash = "zeit-0.6.0-5I6bk4t8AgCP0UGGHVF_khlmWZkAF5XtfQWEKCyLoptU",
+            .url = "git+https://github.com/rockorager/zeit?ref=v0.9.0#b1c1c2fcbc71fd7799a316bbcf0ff88d06d80ccc",
+            .hash = "zeit-0.9.0-5I6bk2m9AgBSMH8-L6rYJkwuQAyhXplnfxnvTSGzVHUR",
         },
         .android = .{
             .path = "third-party/zig-android-sdk",

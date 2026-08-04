@@ -66,7 +66,7 @@ pub fn build(b: *std.Build) void {
             // Installed Rust targets are external toolchain state and can change
             // without any build input changing, so this probe must not be cached.
             rustup.has_side_effects = true;
-            const check_rust_target = b.addCheckFile(rustup.captureStdOut(), .{
+            const check_rust_target = b.addCheckFile(rustup.captureStdOut(.{}), .{
                 .expected_matches = &.{cross_target.rustup},
             });
             check_rust_target.setName(b.fmt(
@@ -162,15 +162,15 @@ fn androidNdkTarget(target: std.Build.ResolvedTarget) []const u8 {
 }
 
 fn addCargoSourceInputs(b: *std.Build, cargo: *std.Build.Step.Run, source_dir: []const u8) void {
-    var dir = b.build_root.handle.openDir(source_dir, .{ .iterate = true }) catch |err|
+    var dir = b.build_root.handle.openDir(b.graph.io, source_dir, .{ .iterate = true }) catch |err|
         @panic(b.fmt("failed to open Cargo source directory '{s}': {s}", .{ source_dir, @errorName(err) }));
-    defer dir.close();
+    defer dir.close(b.graph.io);
 
     var walker = dir.walk(b.allocator) catch @panic("out of memory while walking Cargo sources");
     defer walker.deinit();
 
     var paths: std.ArrayList([]const u8) = .empty;
-    while (walker.next() catch |err|
+    while (walker.next(b.graph.io) catch |err|
         @panic(b.fmt("failed to walk Cargo source directory '{s}': {s}", .{ source_dir, @errorName(err) }))) |entry|
     {
         if (entry.kind != .file) continue;

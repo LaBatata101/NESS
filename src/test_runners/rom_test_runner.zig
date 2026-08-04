@@ -4,6 +4,7 @@ const ness = @import("ness");
 const c = ness.c;
 const Rom = ness.Rom;
 const System = ness.System;
+const ThreadPool = ness.ThreadPool;
 
 const ADDR_STATUS = 0x6000;
 const ADDR_MAGIC_START = 0x6001; // $DE $B0 $61
@@ -40,7 +41,7 @@ const CliOptions = struct {
 
 pub fn suppressLog(
     comptime message_level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
@@ -56,17 +57,19 @@ pub const std_options: std.Options = .{
 };
 
 const TestState = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     passed_count: usize = 0,
     total_count: usize = 0,
     skipped_count: usize = 0,
     failed_tests: std.ArrayList(FailedTest),
     allocator: std.mem.Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator) TestState {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) TestState {
         return .{
             .failed_tests = .empty,
             .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -81,15 +84,14 @@ const TestState = struct {
     }
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
 
-    var options = try parseArgs(allocator, args);
+    var options = try parseArgs(allocator, &args);
     defer options.deinit(allocator);
 
     _ = c.SDL_SetHint(c.SDL_HINT_NO_SIGNAL_HANDLERS, "1");
@@ -100,17 +102,16 @@ pub fn main() !void {
     }
     defer c.SDL_Quit();
 
-    const cwd = std.fs.cwd();
-    var dir = cwd.openDir(TESTS_DIR, .{ .iterate = true }) catch |err| {
+    var dir = std.Io.Dir.cwd().openDir(io, TESTS_DIR, .{ .iterate = true }) catch |err| {
         std.debug.print("Error: Couldn't find '{s}'.\nError: {}\n", .{ TESTS_DIR, err });
         return;
     };
-    defer dir.close();
+    defer dir.close(io);
 
-    var pool: std.Thread.Pool = undefined;
-    try pool.init(.{ .allocator = allocator });
+    var pool: ThreadPool = undefined;
+    try pool.init(.{ .allocator = allocator, .io = io });
 
-    var state = TestState.init(allocator);
+    var state = TestState.init(allocator, io);
     defer state.deinit();
 
     std.debug.print("\n=== RUNNING TEST ROMS ===\n\n", .{});
@@ -118,7 +119,7 @@ pub fn main() !void {
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".nes")) continue;
 
@@ -126,14 +127,14 @@ pub fn main() !void {
 
         if (skipReason(entry.path, options.skip_patterns.items)) |reason| {
             const name_stem = displayName(entry.path);
-            state.mutex.lock();
+            state.mutex.lockUncancelable(io);
             state.skipped_count += 1;
             if (reason.len > 0) {
                 std.debug.print("{s: <30} \x1b[33mSKIP\x1b[0m \t\x1b[1m{s}\x1b[0m\n", .{ name_stem, reason });
             } else {
                 std.debug.print("{s: <30} \x1b[33mSKIP\x1b[0m\n", .{name_stem});
             }
-            state.mutex.unlock();
+            state.mutex.unlock(io);
             continue;
         }
 
@@ -145,9 +146,9 @@ pub fn main() !void {
         try pool.spawn(run_test_wrapper, .{ &state, rom_path });
     }
 
-    var timer = std.time.Timer.start() catch @panic("failed to start timer");
+    const timer = std.Io.Timestamp.now(io, .awake);
     pool.deinit(); // This will wait for all threads to finish
-    const exec_time = timer.lap();
+    const exec_time = timer.untilNow(io, .awake).toNanoseconds();
 
     if (state.failed_tests.items.len > 0) {
         std.debug.print("\nFailed Tests:\n", .{});
@@ -166,7 +167,7 @@ pub fn main() !void {
         std.debug.print("Skipped: {}\n", .{state.skipped_count});
     }
     std.debug.print("Total time: {d:.2}ms\n", .{
-        exec_time / std.time.ns_per_ms,
+        @as(f64, @floatFromInt(exec_time)) / std.time.ns_per_ms,
     });
 
     if (state.failed_tests.items.len > 0) {
@@ -174,17 +175,14 @@ pub fn main() !void {
     }
 }
 
-fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !CliOptions {
+fn parseArgs(allocator: std.mem.Allocator, args: *std.process.Args.Iterator) !CliOptions {
     var options: CliOptions = .{};
     errdefer options.deinit(allocator);
 
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
+    _ = args.skip();
+    while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--skip")) {
-            i += 1;
-            if (i >= args.len) return error.MissingSkipPattern;
-            try options.skip_patterns.append(allocator, args[i]);
+            try options.skip_patterns.append(allocator, args.next() orelse return error.MissingSkipPattern);
         } else if (std.mem.startsWith(u8, arg, "--skip=")) {
             try options.skip_patterns.append(allocator, arg["--skip=".len..]);
         } else {
@@ -224,22 +222,22 @@ fn run_test_wrapper(state: *TestState, rom_path: []const u8) void {
     var should_free_path = true;
     defer if (should_free_path) state.allocator.free(rom_path);
 
-    var timer = std.time.Timer.start() catch @panic("failed to start timer");
-    const result = run_test_rom(state.allocator, rom_path) catch |err| {
+    const timer = std.Io.Timestamp.now(state.io, .awake);
+    const result = run_test_rom(state.allocator, state.io, rom_path) catch |err| {
         // Handle unexpected runtime errors (file not found, etc)
-        state.mutex.lock();
-        defer state.mutex.unlock();
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
         // Strip "test_roms/" prefix then the extension for a readable path-aware name
         const rel = rom_path[TESTS_DIR.len + 1 ..];
         const display = if (std.mem.lastIndexOfScalar(u8, rel, '.')) |i| rel[0..i] else rel;
         std.debug.print("{s}... \x1b[31mERROR ({})\x1b[0m\n", .{ display, err });
         return;
     };
-    const exec_time = timer.lap();
+    const exec_time = timer.untilNow(state.io, .awake).toNanoseconds();
 
     // Lock mutex to safely print to stdout and update stats
-    state.mutex.lock();
-    defer state.mutex.unlock();
+    state.mutex.lockUncancelable(state.io);
+    defer state.mutex.unlock(state.io);
 
     state.total_count += 1;
 
@@ -253,7 +251,7 @@ fn run_test_wrapper(state: *TestState, rom_path: []const u8) void {
             state.passed_count += 1;
             std.debug.print("{s: <30} \x1b[32mOK\x1b[0m \ttook {d:.2}ms\n", .{
                 name_stem,
-                exec_time / std.time.ns_per_ms,
+                @as(f64, @floatFromInt(exec_time)) / std.time.ns_per_ms,
             });
         },
         .failed => |fail_data| {
@@ -288,20 +286,14 @@ const TestResult = union(enum) {
     failed: FailedTest,
 };
 
-fn run_test_rom(allocator: std.mem.Allocator, path: []const u8) !TestResult {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-
-    const file_size = try file.getEndPos();
-    try file.seekTo(0);
-    const buffer = try allocator.alloc(u8, file_size);
+fn run_test_rom(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !TestResult {
+    const buffer = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
     defer allocator.free(buffer);
-    _ = try file.read(buffer);
 
-    var rom = try Rom.init(allocator, path, buffer);
+    var rom = try Rom.init(allocator, io, path, buffer);
     defer rom.deinit();
 
-    var system = try System.init(allocator, &rom, .{ .disable_audio = true });
+    var system = try System.init(allocator, io, &rom, .{ .disable_audio = true });
     defer system.deinit();
     system.reset();
 

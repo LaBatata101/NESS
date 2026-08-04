@@ -18,6 +18,7 @@ pub fn build(b: *Build) void {
                     break :blk lazy_android.resolveTargets(b, .{
                         .default_target = root_target,
                         .all_targets = true,
+                        .api_level = .android15,
                     });
                 }
             }

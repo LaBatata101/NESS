@@ -70,8 +70,8 @@ pub const Rom = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, rom_path: []const u8, bytes: []u8) !Self {
-        return initWithOptions(allocator, rom_path, bytes, .{});
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, rom_path: []const u8, bytes: []u8) !Self {
+        return initWithOptions(allocator, io, rom_path, bytes, .{});
     }
 
     const InitOptions = struct {
@@ -79,7 +79,7 @@ pub const Rom = struct {
         disable_battery_ram: bool = false,
     };
 
-    pub fn initWithOptions(allocator: std.mem.Allocator, rom_path: []const u8, bytes: []u8, options: InitOptions) !Self {
+    pub fn initWithOptions(allocator: std.mem.Allocator, io: std.Io, rom_path: []const u8, bytes: []u8, options: InitOptions) !Self {
         if (!std.mem.eql(u8, bytes[0..4], &NES_TAG)) {
             return error.InvalidNesFormat;
         }
@@ -132,7 +132,7 @@ pub const Rom = struct {
             if (has_persistent_battery) "YES" else "NO",
         });
 
-        const mapper = try Mapper.init(allocator, mapper_id, .{
+        const mapper = try Mapper.init(allocator, io, mapper_id, .{
             .rom_path = rom_path,
             .prg_rom = prg_rom,
             .chr_rom = chr_rom,
@@ -230,7 +230,7 @@ pub const TestRom = struct {
             .rom = .{
                 .prg_rom = prg_rom,
                 .chr_rom = @constCast(chr_rom),
-                .mapper = Mapper.init(alloc, 0, .{
+                .mapper = Mapper.init(alloc, std.testing.io, 0, .{
                     .rom_path = "test.rom",
                     .prg_rom = prg_rom,
                     .chr_rom = chr_rom,
@@ -261,7 +261,13 @@ test "network ROM battery RAM is disabled" {
     // A battery-backed local Mapper 1 ROM requires a filesystem path. A
     // transferred ROM with only a display name must still initialize because
     // initNetwork forces its mapper RAM to the volatile implementation.
-    var network_rom = try Rom.initWithOptions(alloc, "remote.nes", bytes, .{ .disable_battery_ram = true });
+    var network_rom = try Rom.initWithOptions(
+        alloc,
+        std.testing.io,
+        "remote.nes",
+        bytes,
+        .{ .disable_battery_ram = true },
+    );
     defer network_rom.deinit();
     network_rom.prg_ram_write(0, 0x5a);
     try std.testing.expectEqual(@as(u8, 0x5a), network_rom.prg_ram_read(0));

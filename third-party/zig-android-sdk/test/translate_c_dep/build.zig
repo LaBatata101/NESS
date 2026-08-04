@@ -14,7 +14,8 @@ pub fn build(b: *std.Build) void {
     const exe_name: []const u8 = "translate_c_test";
     const root_target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const android_targets = android.standardTargets(b, root_target);
+    const android_api_level: android.ApiLevel = .android15;
+    const android_targets = android.standardTargets(b, root_target, android_api_level);
 
     if (!is_latest_stable_zig) {
         log.warn("skipping translate-c as dependency test for Zig {}", .{builtin.zig_version_string});
@@ -33,7 +34,7 @@ pub fn build(b: *std.Build) void {
         const android_sdk = android.Sdk.create(b, .{});
         const apk = android_sdk.createApk(.{
             .name = exe_name,
-            .api_level = .android15,
+            .api_level = android_api_level,
             .build_tools_version = "35.0.1",
             .ndk_version = "29.0.13113456",
         });

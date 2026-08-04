@@ -1,6 +1,8 @@
 const std = @import("std");
 const android = @import("android");
 
+const android_api_level: android.ApiLevel = .android15;
+
 pub fn build(b: *std.Build) !void {
     const exe_name = "neskwik";
     const package_name = "com.labatata.neskwik";
@@ -8,7 +10,7 @@ pub fn build(b: *std.Build) !void {
     const root_target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const iroh_lib_dir = b.option([]const u8, "iroh-lib-dir", "Directory containing a prebuilt iroh-ffi static archive");
-    const android_targets = android.standardTargets(b, root_target);
+    const android_targets = android.standardTargets(b, root_target, android_api_level);
 
     var root_target_single = [_]std.Build.ResolvedTarget{root_target};
     const targets: []std.Build.ResolvedTarget = if (android_targets.len == 0)
@@ -22,7 +24,7 @@ pub fn build(b: *std.Build) !void {
         const android_sdk = android.Sdk.create(b, .{});
         const apk = android_sdk.createApk(.{
             .name = exe_name,
-            .api_level = .android15,
+            .api_level = android_api_level,
             .build_tools_version = "36.1.0",
             .ndk_version = "28.2.13676358",
         });
@@ -181,11 +183,13 @@ fn createNessModule(
     iroh_lib_dir: ?[]const u8,
 ) !NessDeps {
     const preferred_linkage: std.builtin.LinkMode = if (target.result.abi.isAndroid()) .dynamic else .static;
+    const enable_pic: ?bool = if (target.result.abi.isAndroid()) true else null;
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+    addAndroidCImportMacros(b, target, mod);
 
     const sdl_dep = b.dependency("sdl", .{
         .target = target,
@@ -200,17 +204,19 @@ fn createNessModule(
             .{
                 .target = target,
                 .optimize = optimize,
+                .pic = enable_pic,
                 .link_libc = true,
             },
         ) },
     );
-    blip_buf_lib.addCSourceFile(.{ .file = b.path("third-party/blip_buf-1.1.0/blip_buf.c") });
+    blip_buf_lib.root_module.addCSourceFile(.{ .file = b.path("third-party/blip_buf-1.1.0/blip_buf.c") });
     mod.addIncludePath(b.path("third-party/blip_buf-1.1.0"));
     mod.linkLibrary(blip_buf_lib);
 
     const clay_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
+        .pic = enable_pic,
         .link_libc = true,
     });
     clay_mod.addIncludePath(b.path("third-party/clay"));
@@ -220,16 +226,22 @@ fn createNessModule(
         .linkage = .static,
         .root_module = clay_mod,
     });
-    clay_lib.addCSourceFile(.{ .file = b.path("third-party/clay/clay_impl.c") });
+    clay_lib.root_module.addCSourceFile(.{ .file = b.path("third-party/clay/clay_impl.c") });
     mod.linkLibrary(clay_lib);
 
     const font_raster_dep = b.dependency("font_raster", .{
         .target = target,
         .optimize = optimize,
+        .pic = true,
         .@"enable-harfbuzz" = false,
         .@"enable-libpng" = false,
     });
     const font_raster_mod = font_raster_dep.module("font_raster");
+    if (target.result.abi.isAndroid()) {
+        const freetype_mod = font_raster_mod.import_table.get("freetype") orelse
+            @panic("font_raster does not expose its freetype import");
+        addAndroidCImportMacros(b, target, freetype_mod);
+    }
     mod.addImport("font_raster", font_raster_mod);
     const font_raster_lib = blk: {
         for (font_raster_mod.link_objects.items) |link_object| {
@@ -244,6 +256,7 @@ fn createNessModule(
     const glslang_dep = b.dependency("glslang", .{
         .target = target,
         .optimize = optimize,
+        .enable_pic = true,
     });
     const glslang_lib = glslang_dep.artifact("glslang");
     mod.linkLibrary(glslang_lib);
@@ -251,6 +264,7 @@ fn createNessModule(
     const spirv_cross_dep = b.dependency("spirv_cross", .{
         .target = target,
         .optimize = optimize,
+        .pic = true,
     });
     const spirv_cross_lib = spirv_cross_dep.artifact("spirv-cross-c");
     mod.linkLibrary(spirv_cross_lib);
@@ -275,7 +289,9 @@ fn createNessModule(
             .target = target,
             .optimize = optimize,
         });
-    mod.addImport("iroh", iroh_dep.module("iroh"));
+    const iroh_mod = iroh_dep.module("iroh");
+    addAndroidCImportMacros(b, target, iroh_mod);
+    mod.addImport("iroh", iroh_mod);
 
     mod.addAnonymousImport("pixeloid_font", .{ .root_source_file = b.path("resources/fonts/PixeloidSans.ttf") });
     mod.addAnonymousImport("nes_controller_img", .{ .root_source_file = b.path("resources/images/nes-controller.png") });
@@ -304,6 +320,24 @@ fn createNessModule(
         .glslang_lib = glslang_lib,
         .spirv_cross_lib = spirv_cross_lib,
     };
+}
+
+fn addAndroidCImportMacros(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    module: *std.Build.Module,
+) void {
+    if (!target.result.abi.isAndroid()) return;
+
+    const api_level = b.fmt("{d}", .{android_api_level});
+    module.addCMacro("__ANDROID_API__", api_level);
+    module.addCMacro("__ANDROID_MIN_SDK_VERSION__", api_level);
+
+    // Zig 0.16's C translator rejects Bionic's nullability annotations
+    // inside array parameter declarators. They do not affect the ABI.
+    module.addCMacro("_Nullable", "");
+    module.addCMacro("_Nonnull", "");
+    module.addCMacro("_Null_unspecified", "");
 }
 
 const BorderShaderFile = struct {
@@ -351,12 +385,12 @@ fn collectBorderShaderFiles(
     else
         try std.fs.path.join(b.allocator, &.{ shader_dir_path, rel_dir });
 
-    var shader_dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err|
+    var shader_dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch |err|
         @panic(b.fmt("failed to open border shader directory '{s}': {s}", .{ dir_path, @errorName(err) }));
-    defer shader_dir.close();
+    defer shader_dir.close(b.graph.io);
 
     var iter = shader_dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(b.graph.io)) |entry| {
         const rel_path = if (rel_dir.len == 0)
             try b.allocator.dupe(u8, entry.name)
         else
@@ -443,12 +477,12 @@ fn appendZigStringContent(b: *std.Build, source: *std.ArrayList(u8), value: []co
 }
 
 fn linkAppLibraries(compile: *std.Build.Step.Compile, deps: NessDeps) void {
-    compile.linkLibrary(deps.sdl_lib);
-    compile.linkLibrary(deps.blip_buf_lib);
-    compile.linkLibrary(deps.clay_lib);
-    compile.linkLibrary(deps.font_raster_lib);
-    compile.linkLibrary(deps.glslang_lib);
-    compile.linkLibrary(deps.spirv_cross_lib);
+    compile.root_module.linkLibrary(deps.sdl_lib);
+    compile.root_module.linkLibrary(deps.blip_buf_lib);
+    compile.root_module.linkLibrary(deps.clay_lib);
+    compile.root_module.linkLibrary(deps.font_raster_lib);
+    compile.root_module.linkLibrary(deps.glslang_lib);
+    compile.root_module.linkLibrary(deps.spirv_cross_lib);
 }
 
 fn addTestStep(

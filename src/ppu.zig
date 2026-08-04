@@ -1035,7 +1035,7 @@ pub const PPU = struct {
                 self.rom.mapper_ppu_address_updated(new_addr, self.global_cycle);
                 return self.rom.chr_read(new_addr);
             },
-            0x2000...0x3EFF => self.vram[self.mirror_vram_addr(new_addr)],
+            0x2000...0x3EFF => self.vram_read(new_addr),
             0x3F00...0x3FFF => {
                 var palette_addr = new_addr & 0x1F;
                 palette_addr = switch (palette_addr) {
@@ -1069,7 +1069,7 @@ pub const PPU = struct {
         }
     }
 
-    fn vram_read(self: *Self, addr: u16) u8 {
+    fn vram_read(self: *const Self, addr: u16) u8 {
         return self.vram[self.mirror_vram_addr(addr)];
     }
 

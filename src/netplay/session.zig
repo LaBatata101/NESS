@@ -1,5 +1,6 @@
 const std = @import("std");
 const iroh = @import("iroh");
+const env = @import("../env.zig");
 const protocol = @import("protocol.zig");
 const Ref = @import("../utils/types.zig").Ref;
 
@@ -74,8 +75,9 @@ const max_queue_items = 128;
 /// handles.
 pub const SessionManager = struct {
     alloc: std.mem.Allocator,
-    mutex: std.Thread.Mutex = .{},
-    wake: std.Thread.Condition = .{},
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
+    wake: std.Io.Condition = .init,
     role: Role = .none,
     state: State = .idle,
     cancelled: bool = false,
@@ -95,9 +97,9 @@ pub const SessionManager = struct {
 
     const Self = @This();
 
-    pub fn init(alloc: std.mem.Allocator) Self {
+    pub fn init(alloc: std.mem.Allocator, io: std.Io) Self {
         std.log.debug("netplay: initializing session manager", .{});
-        return .{ .alloc = alloc };
+        return .{ .alloc = alloc, .io = io };
     }
 
     pub fn deinit(self: *Self) void {
@@ -108,30 +110,30 @@ pub const SessionManager = struct {
         if (self.shutdown_worker) |thread| thread.join();
         if (self.timeout_worker) |thread| thread.join();
 
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.io);
         self.clear();
         self.outgoing.deinit(self.alloc);
         self.events.deinit(self.alloc);
-        self.mutex.unlock();
+        self.mutex.unlock(self.io);
     }
 
     pub fn getRole(self: *Self) Role {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return self.role;
     }
 
     pub fn getState(self: *Self) State {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return self.state;
     }
 
     /// Copies current transport telemetry while holding the lock that protects
     /// the worker-owned connection handle.
     pub fn getConnectionStats(self: *Self) !?ConnectionStats {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const connection = self.connection orelse return null;
         return try connection.get().stats();
@@ -154,8 +156,8 @@ pub const SessionManager = struct {
         });
 
         self.reapFinished();
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.role != .none) return error.SessionAlreadyActive;
         try verifyAbi();
@@ -199,8 +201,8 @@ pub const SessionManager = struct {
         });
 
         self.reapFinished();
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.role != .none) return error.SessionAlreadyActive;
         try verifyAbi();
@@ -247,8 +249,8 @@ pub const SessionManager = struct {
         };
         errdefer self.alloc.free(encoded);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.cancelled or self.role == .none) return error.SessionClosed;
         if (self.outgoing.items.len >= max_queue_items) {
@@ -262,21 +264,21 @@ pub const SessionManager = struct {
 
         try self.outgoing.append(self.alloc, .init(encoded));
         logMessage(.queued, self.role, message, self.outgoing.items.len, encoded.len);
-        self.wake.signal();
+        self.wake.signal(self.io);
     }
 
     pub fn pollEvent(self: *Self) ?EventRef.Owned {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.events.items.len == 0) return null;
         return self.events.orderedRemove(0);
     }
 
     pub fn cancel(self: *Self) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.io);
         if (self.role == .none or self.cancelled) {
-            self.mutex.unlock();
+            self.mutex.unlock(self.io);
             return;
         }
 
@@ -288,9 +290,9 @@ pub const SessionManager = struct {
             self.pushEvent(.init(.{ .state = .disconnecting })) catch {};
         }
 
-        self.wake.broadcast();
+        self.wake.broadcast(self.io);
         self.startShutdown();
-        self.mutex.unlock();
+        self.mutex.unlock(self.io);
     }
 
     pub fn disconnect(self: *Self) void {
@@ -302,7 +304,7 @@ pub const SessionManager = struct {
             std.log.warn("netplay: could not queue disconnect notice: {s}", .{@errorName(err)});
         };
 
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.io);
         self.graceful_shutdown = true;
 
         // During preview the client worker is waiting on the outgoing queue
@@ -312,12 +314,12 @@ pub const SessionManager = struct {
             std.log.info("netplay: client declining session preview", .{});
             self.state = .disconnecting;
             self.pushEvent(.init(.{ .state = .disconnecting })) catch {};
-            self.wake.broadcast();
-            self.mutex.unlock();
+            self.wake.broadcast(self.io);
+            self.mutex.unlock(self.io);
             return;
         }
 
-        self.mutex.unlock();
+        self.mutex.unlock(self.io);
         self.cancel();
     }
 
@@ -577,10 +579,10 @@ pub const SessionManager = struct {
 
         const sender = try std.Thread.spawn(.{}, sendMain, .{ self, send_stream });
         defer {
-            self.mutex.lock();
+            self.mutex.lockUncancelable(self.io);
             self.cancelled = true;
-            self.wake.broadcast();
-            self.mutex.unlock();
+            self.wake.broadcast(self.io);
+            self.mutex.unlock(self.io);
 
             sender.join();
         }
@@ -626,18 +628,18 @@ pub const SessionManager = struct {
     }
 
     fn waitOutgoing(self: *Self) !BytesRef.Owned {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
-        while (self.outgoing.items.len == 0 and !self.cancelled) self.wake.wait(&self.mutex);
+        while (self.outgoing.items.len == 0 and !self.cancelled) self.wake.waitUncancelable(self.io, &self.mutex);
 
         if (self.outgoing.items.len != 0) return self.outgoing.orderedRemove(0);
         return error.SessionClosed;
     }
 
     fn setState(self: *Self, state: State) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.cancelled and state != .failed and state != .idle) return;
 
@@ -654,8 +656,8 @@ pub const SessionManager = struct {
     }
 
     fn pushEventLocked(self: *Self, event: EventRef.Owned) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         try self.pushEvent(event);
     }
@@ -697,8 +699,8 @@ pub const SessionManager = struct {
         else
             self.alloc.dupe(u8, @errorName(err)) catch @panic("OOM");
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.cancelled) {
             self.alloc.free(fail_message);
@@ -711,12 +713,12 @@ pub const SessionManager = struct {
     }
 
     fn finishWorker(self: *Self) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.io);
 
         self.endpoint = null;
         self.connection = null;
         self.cancelled = true;
-        self.wake.broadcast();
+        self.wake.broadcast(self.io);
 
         const failed = self.state == .failed;
         const finished_role = self.role;
@@ -727,20 +729,20 @@ pub const SessionManager = struct {
         self.pushEvent(.init(.disconnected)) catch {};
         if (!failed) self.pushEvent(.init(.{ .state = .idle })) catch {};
 
-        self.mutex.unlock();
+        self.mutex.unlock(self.io);
 
         std.log.info("netplay: {s} worker finished (failed={any})", .{ @tagName(finished_role), failed });
     }
 
     fn shutdownMain(self: *Self) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.io);
         const endpoint = self.endpoint;
         const connection = self.connection;
         const graceful = self.graceful_shutdown;
-        self.mutex.unlock();
+        self.mutex.unlock(self.io);
 
         std.log.debug("netplay: shutdown worker closing connection and endpoint (graceful={any})", .{graceful});
-        if (graceful) std.Thread.sleep(20 * std.time.ns_per_ms);
+        if (graceful) sleep(self.io, 20 * std.time.ns_per_ms);
 
         if (connection) |value| value.get().close(0, "session shutdown") catch |err| {
             std.log.warn("netplay: connection close failed: {s}", .{@errorName(err)});
@@ -756,19 +758,19 @@ pub const SessionManager = struct {
     fn timeoutMain(self: *Self, armed_state: State) void {
         std.log.debug("netplay: setup timeout armed for state {s} (30 seconds)", .{@tagName(armed_state)});
 
-        const deadline = std.time.milliTimestamp() + 30_000;
-        while (std.time.milliTimestamp() < deadline) {
-            self.mutex.lock();
+        const deadline = milliTimestamp(self.io) + 30_000;
+        while (milliTimestamp(self.io) < deadline) {
+            self.mutex.lockUncancelable(self.io);
             const pending = self.role == .client and self.state == armed_state and !self.cancelled;
-            self.mutex.unlock();
+            self.mutex.unlock(self.io);
 
             if (!pending) return;
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            sleep(self.io, 10 * std.time.ns_per_ms);
         }
 
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.io);
         if (self.role != .client or self.state != armed_state or self.cancelled) {
-            self.mutex.unlock();
+            self.mutex.unlock(self.io);
             return;
         }
 
@@ -784,9 +786,9 @@ pub const SessionManager = struct {
         };
         if (message) |value| self.pushEvent(.init(.{ .failed = value })) catch {};
 
-        self.wake.broadcast();
+        self.wake.broadcast(self.io);
         self.startShutdown();
-        self.mutex.unlock();
+        self.mutex.unlock(self.io);
     }
 
     fn startShutdown(self: *Self) void {
@@ -799,36 +801,36 @@ pub const SessionManager = struct {
     }
 
     fn joinShutdown(self: *Self) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.io);
         const thread = self.shutdown_worker;
         self.shutdown_worker = null;
-        self.mutex.unlock();
+        self.mutex.unlock(self.io);
 
         if (thread) |value| value.join();
     }
 
     fn restartTimeout(self: *Self, state: State) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.io);
         const old = self.timeout_worker;
         self.timeout_worker = null;
-        self.mutex.unlock();
+        self.mutex.unlock(self.io);
 
         if (old) |thread| thread.join();
 
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.io);
         if (!self.cancelled and self.role == .client and self.state == state) {
             self.timeout_worker = std.Thread.spawn(.{}, timeoutMain, .{ self, state }) catch |err| blk: {
                 std.log.err("netplay: failed to restart setup-timeout worker: {s}", .{@errorName(err)});
                 break :blk null;
             };
         }
-        self.mutex.unlock();
+        self.mutex.unlock(self.io);
     }
 
     fn reapFinished(self: *Self) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.io);
         if (self.role != .none) {
-            self.mutex.unlock();
+            self.mutex.unlock(self.io);
             return;
         }
 
@@ -839,7 +841,7 @@ pub const SessionManager = struct {
         self.worker = null;
         self.shutdown_worker = null;
         self.timeout_worker = null;
-        self.mutex.unlock();
+        self.mutex.unlock(self.io);
 
         if (worker) |thread| thread.join();
         if (shutdown) |thread| thread.join();
@@ -847,38 +849,38 @@ pub const SessionManager = struct {
     }
 
     fn publishEndpoint(self: *Self, endpoint: EndpointRef.Borrowed) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.cancelled) return error.SessionClosed;
         self.endpoint = endpoint;
     }
 
     fn publishConnection(self: *Self, connection: ConnectionRef.Borrowed) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.cancelled) return error.SessionClosed;
         self.connection = connection;
     }
 
     fn clearPublishedConnection(self: *Self) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         self.connection = null;
     }
 
     fn isCancelled(self: *Self) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         return self.cancelled;
     }
 
     fn takeHostPreview(self: *Self) ?PreviewRef.Owned {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const result = self.host_preview;
         self.host_preview = null;
@@ -887,8 +889,8 @@ pub const SessionManager = struct {
     }
 
     fn takeConnectTicket(self: *Self) ?BytesRef.Owned {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const result = self.connect_ticket;
         self.connect_ticket = null;
@@ -987,12 +989,18 @@ fn recvMessage(alloc: std.mem.Allocator, stream: RecvStreamRef.Borrowed) !Messag
     return MessageRef.Owned.init(try protocol.decodePayload(alloc, body));
 }
 
+fn sleep(io: std.Io, nanoseconds: u64) void {
+    std.Io.sleep(io, .fromNanoseconds(@intCast(nanoseconds)), .awake) catch {};
+}
+
+fn milliTimestamp(io: std.Io) i64 {
+    return std.Io.Timestamp.now(io, .real).toMilliseconds();
+}
+
 // Testing
 
-fn checkIfLoopbackTestIsEnabled(alloc: std.mem.Allocator) !void {
-    const enabled = std.process.getEnvVarOwned(alloc, "NESKWIK_NETPLAY_LOOPBACK_TEST") catch
-        return error.SkipZigTest;
-    defer alloc.free(enabled);
+fn checkIfLoopbackTestIsEnabled() !void {
+    const enabled = env.get("NESKWIK_NETPLAY_LOOPBACK_TEST") orelse return error.SkipZigTest;
 
     if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;
 }
@@ -1014,20 +1022,20 @@ fn startLoopbackHost(host: *SessionManager, alloc: std.mem.Allocator, name: []co
 }
 
 fn waitForSessionCode(host: *SessionManager, deadline: i64) ![]u8 {
-    while (std.time.milliTimestamp() < deadline) {
+    while (milliTimestamp(std.testing.io) < deadline) {
         if (host.pollEvent()) |event_value| {
             var event = event_value;
 
             if (event.value == .session_code) return event.value.takeSessionCode().value;
             event.value.deinit(host.alloc);
-        } else std.Thread.sleep(std.time.ns_per_ms);
+        } else sleep(std.testing.io, std.time.ns_per_ms);
     }
 
     return error.SessionCodeTimeout;
 }
 
 test "session state starts idle and validates codes synchronously" {
-    var manager = SessionManager.init(std.testing.allocator);
+    var manager = SessionManager.init(std.testing.allocator, std.testing.io);
     defer manager.deinit();
 
     try std.testing.expectEqual(Role.none, manager.getRole());
@@ -1037,7 +1045,7 @@ test "session state starts idle and validates codes synchronously" {
 
 test "owned event payload is released when the queue is full" {
     const alloc = std.testing.allocator;
-    var manager = SessionManager.init(alloc);
+    var manager = SessionManager.init(alloc, std.testing.io);
     defer manager.deinit();
 
     for (0..max_queue_items) |_| {
@@ -1053,15 +1061,15 @@ test "owned event payload is released when the queue is full" {
 
 test "local loopback session" {
     const alloc = std.testing.allocator;
-    try checkIfLoopbackTestIsEnabled(alloc);
+    try checkIfLoopbackTestIsEnabled();
 
-    var host = SessionManager.init(alloc);
+    var host = SessionManager.init(alloc, std.testing.io);
     defer host.deinit();
-    var client = SessionManager.init(alloc);
+    var client = SessionManager.init(alloc, std.testing.io);
     defer client.deinit();
     try startLoopbackHost(&host, alloc, "loopback.nes");
 
-    const deadline = std.time.milliTimestamp() + 15_000;
+    const deadline = milliTimestamp(std.testing.io) + 15_000;
     const code = try waitForSessionCode(&host, deadline);
     defer alloc.free(code);
     try client.connectWithPreset(code, .minimal);
@@ -1071,7 +1079,7 @@ test "local loopback session" {
     var frame_received = false;
     var ack_received = false;
 
-    while (!ack_received and std.time.milliTimestamp() < deadline) {
+    while (!ack_received and milliTimestamp(std.testing.io) < deadline) {
         while (host.pollEvent()) |event_value| {
             var event = event_value;
             defer event.value.deinit(alloc);
@@ -1135,7 +1143,7 @@ test "local loopback session" {
             } }));
         }
 
-        std.Thread.sleep(std.time.ns_per_ms);
+        sleep(std.testing.io, std.time.ns_per_ms);
     }
 
     try std.testing.expect(host_connected and client_connected and frame_received and ack_received);
@@ -1157,15 +1165,15 @@ test "local loopback session" {
 
 test "local loopback session preview decline" {
     const alloc = std.testing.allocator;
-    try checkIfLoopbackTestIsEnabled(alloc);
+    try checkIfLoopbackTestIsEnabled();
 
-    var host = SessionManager.init(alloc);
+    var host = SessionManager.init(alloc, std.testing.io);
     defer host.deinit();
-    var declining_client = SessionManager.init(alloc);
+    var declining_client = SessionManager.init(alloc, std.testing.io);
     defer declining_client.deinit();
     try startLoopbackHost(&host, alloc, "declined.nes");
 
-    const deadline = std.time.milliTimestamp() + 15_000;
+    const deadline = milliTimestamp(std.testing.io) + 15_000;
     const code = try waitForSessionCode(&host, deadline);
     defer alloc.free(code);
     try declining_client.connectWithPreset(code, .minimal);
@@ -1176,7 +1184,7 @@ test "local loopback session preview decline" {
     var peer_disconnected = false;
     var failure_received = false;
 
-    while (!client_ended and std.time.milliTimestamp() < deadline) {
+    while (!client_ended and milliTimestamp(std.testing.io) < deadline) {
         while (host.pollEvent()) |event_value| {
             var event = event_value;
             defer event.value.deinit(alloc);
@@ -1204,7 +1212,7 @@ test "local loopback session preview decline" {
             }
         }
 
-        std.Thread.sleep(std.time.ns_per_ms);
+        sleep(std.testing.io, std.time.ns_per_ms);
     }
 
     try std.testing.expect(preview_received);
@@ -1216,7 +1224,7 @@ test "local loopback session preview decline" {
     try std.testing.expectEqual(State.waiting, host.getState());
 
     // The same session code remains usable after the first client declines.
-    var joined_client = SessionManager.init(alloc);
+    var joined_client = SessionManager.init(alloc, std.testing.io);
     defer joined_client.deinit();
     try joined_client.connectWithPreset(code, .minimal);
 
@@ -1224,9 +1232,9 @@ test "local loopback session preview decline" {
     var client_connected = false;
     var disconnect_requested = false;
     client_ended = false;
-    const reconnect_deadline = std.time.milliTimestamp() + 15_000;
+    const reconnect_deadline = milliTimestamp(std.testing.io) + 15_000;
 
-    while ((!host_ended or !client_ended) and std.time.milliTimestamp() < reconnect_deadline) {
+    while ((!host_ended or !client_ended) and milliTimestamp(std.testing.io) < reconnect_deadline) {
         while (host.pollEvent()) |event_value| {
             var event = event_value;
             defer event.value.deinit(alloc);
@@ -1278,7 +1286,7 @@ test "local loopback session preview decline" {
             joined_client.disconnect();
         }
 
-        std.Thread.sleep(std.time.ns_per_ms);
+        sleep(std.testing.io, std.time.ns_per_ms);
     }
 
     try std.testing.expect(host_connected and client_connected);
@@ -1289,23 +1297,23 @@ test "local loopback session preview decline" {
 
 test "immediate cancellation does not strand host or client workers" {
     const alloc = std.testing.allocator;
-    try checkIfLoopbackTestIsEnabled(alloc);
+    try checkIfLoopbackTestIsEnabled();
 
     for (0..8) |_| {
-        var cancelled_host = SessionManager.init(alloc);
+        var cancelled_host = SessionManager.init(alloc, std.testing.io);
         try startLoopbackHost(&cancelled_host, alloc, "cancelled.nes");
         cancelled_host.cancel();
         cancelled_host.deinit();
 
-        var host = SessionManager.init(alloc);
+        var host = SessionManager.init(alloc, std.testing.io);
         defer host.deinit();
         try startLoopbackHost(&host, alloc, "client-cancel.nes");
 
-        const deadline = std.time.milliTimestamp() + 15_000;
+        const deadline = milliTimestamp(std.testing.io) + 15_000;
         const code = try waitForSessionCode(&host, deadline);
         defer alloc.free(code);
 
-        var client = SessionManager.init(alloc);
+        var client = SessionManager.init(alloc, std.testing.io);
         try client.connectWithPreset(code, .minimal);
         client.cancel();
         client.deinit();

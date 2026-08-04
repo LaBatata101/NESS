@@ -62,14 +62,14 @@ pub const Mapper = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, mapper_id: u8, params: MapperParams) !Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, mapper_id: u8, params: MapperParams) !Self {
         switch (mapper_id) {
             0 => {
                 const mapper = try Mapper0.init(allocator, params);
                 return mapper.as_mapper();
             },
             1 => {
-                const mapper = try Mapper1.init(allocator, params);
+                const mapper = try Mapper1.init(allocator, io, params);
                 return mapper.as_mapper();
             },
             2 => {
@@ -81,7 +81,7 @@ pub const Mapper = struct {
                 return mapper.as_mapper();
             },
             4 => {
-                const mapper = try Mapper4.init(allocator, params);
+                const mapper = try Mapper4.init(allocator, io, params);
                 return mapper.as_mapper();
             },
             else => return error.UnsupportedMapper,

@@ -87,7 +87,7 @@ const OnScreenControllerConfig = struct {
     }
 };
 
-pub fn load(alloc: std.mem.Allocator, config_dir: ?[]const u8, settings: *EmulatorSettings) !void {
+pub fn load(alloc: std.mem.Allocator, io: std.Io, config_dir: ?[]const u8, settings: *EmulatorSettings) !void {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
@@ -95,13 +95,14 @@ pub fn load(alloc: std.mem.Allocator, config_dir: ?[]const u8, settings: *Emulat
     const dir = config_dir orelse return;
     const config_path = try std.fs.path.join(arena_alloc, &.{ dir, SETTINGS_FILENAME });
 
-    const file = std.fs.openFileAbsolute(config_path, .{}) catch |err| switch (err) {
+    const file = std.Io.Dir.openFileAbsolute(io, config_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
-    const json_bytes = try file.readToEndAlloc(arena_alloc, 256 * 1024);
+    var file_reader = file.reader(io, &.{});
+    const json_bytes = try file_reader.interface.allocRemaining(arena_alloc, .limited(256 * 1024));
     const parsed = try std.json.parseFromSlice(SettingsConfig, arena_alloc, json_bytes, .{
         .ignore_unknown_fields = true,
     });
@@ -110,13 +111,13 @@ pub fn load(alloc: std.mem.Allocator, config_dir: ?[]const u8, settings: *Emulat
     try applyConfig(alloc, settings, parsed.value);
 }
 
-pub fn save(alloc: std.mem.Allocator, config_dir: ?[]const u8, settings: EmulatorSettings) !void {
+pub fn save(alloc: std.mem.Allocator, io: std.Io, config_dir: ?[]const u8, settings: EmulatorSettings) !void {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
     const dir = config_dir orelse return;
-    try std.fs.cwd().makePath(dir);
+    try std.Io.Dir.cwd().createDirPath(io, dir);
 
     const config_path = try std.fs.path.join(arena_alloc, &.{ dir, SETTINGS_FILENAME });
     const json_bytes = try std.json.Stringify.valueAlloc(arena_alloc, configFromSettings(settings), .{
@@ -124,9 +125,9 @@ pub fn save(alloc: std.mem.Allocator, config_dir: ?[]const u8, settings: Emulato
         .emit_null_optional_fields = false,
     });
 
-    const file = try std.fs.createFileAbsolute(config_path, .{});
-    defer file.close();
-    try file.writeAll(json_bytes);
+    const file = try std.Io.Dir.createFileAbsolute(io, config_path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, json_bytes);
 }
 
 fn applyConfig(alloc: std.mem.Allocator, settings: *EmulatorSettings, config: SettingsConfig) !void {

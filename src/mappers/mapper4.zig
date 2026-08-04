@@ -78,7 +78,7 @@ pub const Mapper4 = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, params: MapperParams) !*Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, params: MapperParams) !*Self {
         const self = try allocator.create(Self);
 
         const chr_is_ram = params.chr_rom.len == 0;
@@ -91,7 +91,7 @@ pub const Mapper4 = struct {
         }
 
         const prg_ram = if (params.has_battery_backed_ram)
-            (try BatteryBackedRam.init(allocator, params.rom_path, params.prg_ram_size)).as_ram()
+            (try BatteryBackedRam.init(allocator, io, params.rom_path, params.prg_ram_size)).as_ram()
         else
             (try VolatileRam.init(allocator, params.prg_ram_size)).as_ram();
 
@@ -364,7 +364,7 @@ test "Mapper4 initialization" {
     defer allocator.free(chr_rom);
     @memset(chr_rom, 0);
 
-    var mapper = try Mapper4.init(allocator, .{
+    var mapper = try Mapper4.init(allocator, std.testing.io, .{
         .prg_rom = prg_rom,
         .chr_rom = chr_rom,
         .prg_rom_banks = 32,
@@ -398,7 +398,7 @@ test "Mapper4 bank select and data" {
     defer allocator.free(chr_rom);
     @memset(chr_rom, 0);
 
-    var mapper = try Mapper4.init(allocator, .{
+    var mapper = try Mapper4.init(allocator, std.testing.io, .{
         .prg_rom = prg_rom,
         .chr_rom = chr_rom,
         .prg_rom_banks = 32,
@@ -434,7 +434,7 @@ test "Mapper4 PRG inversion" {
     defer allocator.free(chr_rom);
     @memset(chr_rom, 0);
 
-    var mapper = try Mapper4.init(allocator, .{
+    var mapper = try Mapper4.init(allocator, std.testing.io, .{
         .prg_rom = prg_rom,
         .chr_rom = chr_rom,
         .prg_rom_banks = 16,
@@ -472,7 +472,7 @@ test "Mapper4 mirroring control" {
     defer allocator.free(chr_rom);
     @memset(chr_rom, 0);
 
-    var mapper = try Mapper4.init(allocator, .{
+    var mapper = try Mapper4.init(allocator, std.testing.io, .{
         .prg_rom = prg_rom,
         .chr_rom = chr_rom,
         .prg_rom_banks = 4,
@@ -505,7 +505,7 @@ test "Mapper4 IRQ functionality" {
     defer allocator.free(chr_rom);
     @memset(chr_rom, 0);
 
-    var mapper = try Mapper4.init(allocator, .{
+    var mapper = try Mapper4.init(allocator, std.testing.io, .{
         .prg_rom = prg_rom,
         .chr_rom = chr_rom,
         .prg_rom_banks = 4,
@@ -557,7 +557,7 @@ test "Mapper4 CHR banking" {
         @memset(chr_rom[start..end], @as(u8, @truncate(bank)));
     }
 
-    var mapper = try Mapper4.init(allocator, .{
+    var mapper = try Mapper4.init(allocator, std.testing.io, .{
         .prg_rom = prg_rom,
         .chr_rom = chr_rom,
         .prg_rom_banks = 4,

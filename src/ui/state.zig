@@ -134,6 +134,7 @@ const Netplay = struct {
 
 pub const AppState = struct {
     alloc: std.mem.Allocator,
+    io: std.Io,
     ui: *UI,
     /// Wheter to skip drawing the home screen.
     render_home_ui: bool = true,
@@ -192,7 +193,7 @@ pub const AppState = struct {
     show_custom_file_picker: bool = false,
     shader_target: settings.ParamTarget = .main,
     shader_file_picker_current_dir: []u8 = &.{},
-    shader_file_picker_entries: std.ArrayList(ShaderFilePickerEntry) = .{},
+    shader_file_picker_entries: std.ArrayList(ShaderFilePickerEntry) = .empty,
     shader_file_picker_error: ?[]u8 = null,
 
     // Edit the on-screen controls on Android
@@ -212,7 +213,7 @@ pub const AppState = struct {
 
     emulation_thread: ?std.Thread = null,
     emulation_stop: std.atomic.Value(bool) = .init(false),
-    emulation_lock: std.Thread.RwLock = .{},
+    emulation_lock: std.Io.RwLock = .init,
     controller1_bits: std.atomic.Value(u8) = .init(0),
     controller2_bits: std.atomic.Value(u8) = .init(0),
     frame_buffers: [2]Frame = .{ Frame.init(), Frame.init() },
@@ -326,11 +327,11 @@ pub const AppState = struct {
         /// Path to the active shader preset (owned by this struct).
         shader_preset_path: ?[]u8 = null,
         /// Active shader parameter overrides (names are owned by this struct).
-        shader_params: std.ArrayList(ShaderParamSetting) = .{},
+        shader_params: std.ArrayList(ShaderParamSetting) = .empty,
         /// Active bundled border shader preset.
         border_shader: BorderShaderOpts = .none,
         /// Active border shader parameter overrides (names are owned by this struct).
-        border_shader_params: std.ArrayList(ShaderParamSetting) = .{},
+        border_shader_params: std.ArrayList(ShaderParamSetting) = .empty,
         vsync: bool = true,
         hide_mouse_on_inactivity: bool = false,
         emulation_speed: EmulationSpeed = .normal,
@@ -347,8 +348,8 @@ pub const AppState = struct {
         android_onscreen_controller: OnScreenController = .{},
     };
 
-    pub fn init(alloc: std.mem.Allocator, ui: *UI) Self {
-        var hist = game_history.GameHistory.init(alloc);
+    pub fn init(alloc: std.mem.Allocator, io: std.Io, ui: *UI) Self {
+        var hist = game_history.GameHistory.init(alloc, io);
         hist.load();
 
         const img_bytes = c.SDL_IOFromConstMem(NES_CONTROLLER_IMG, NES_CONTROLLER_IMG.len);
@@ -361,8 +362,9 @@ pub const AppState = struct {
 
         var state: Self = .{
             .alloc = alloc,
+            .io = io,
             .ui = ui,
-            .netplay = .{ .session_manager = SessionManager.init(alloc) },
+            .netplay = .{ .session_manager = SessionManager.init(alloc, io) },
             .history = hist,
             .config_dir = config_dir,
             .controller_img = .{ .raw = surface },
@@ -429,7 +431,7 @@ pub const AppState = struct {
         var speed_window_start: u64 = c.SDL_GetTicks();
 
         while (!self.emulation_stop.load(.acquire)) {
-            self.emulation_lock.lock();
+            self.emulation_lock.lockUncancelable(self.io);
             const authoritative_client = self.netplay.active_session_role == .client and self.netplay.network_rom;
             const can_run = self.emulation_running and
                 self.system != null and
@@ -499,7 +501,7 @@ pub const AppState = struct {
                 self.emulation_speed_percent.store(percent, .release);
                 speed_window_start = now;
             }
-            self.emulation_lock.unlock();
+            self.emulation_lock.unlock(self.io);
 
             c.SDL_Delay(1);
         }
@@ -788,8 +790,8 @@ pub const AppState = struct {
     }
 
     pub fn debugSnapshot(self: *Self) DebugSnapshot {
-        self.emulation_lock.lockShared();
-        defer self.emulation_lock.unlockShared();
+        self.emulation_lock.lockSharedUncancelable(self.io);
+        defer self.emulation_lock.unlockShared(self.io);
 
         return DebugSnapshot.capture(&self.system.?);
     }
@@ -865,8 +867,8 @@ pub const AppState = struct {
     pub fn resetSystem(self: *Self) void {
         if (self.isConnectedClient()) return;
 
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
 
         self.system.?.reset();
 
@@ -880,22 +882,22 @@ pub const AppState = struct {
     }
 
     pub fn runSystemTick(self: *Self) void {
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
         self.system.?.tick();
     }
 
     pub fn runSystemFrame(self: *Self) void {
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
         self.system.?.run_frame();
     }
 
     pub fn setEmulationSpeed(self: *Self, speed: EmulationSpeed) void {
         if (self.isConnectedClient()) return;
 
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
 
         self.settings.emulation_speed = speed;
 
@@ -925,12 +927,12 @@ pub const AppState = struct {
         const name = self.romDisplayName();
         defer self.alloc.free(name);
 
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
 
         std.log.info("Saving state to slot {} for \"{s}\"", .{ slot + 1, name });
 
-        const info = save_state.saveSlot(self.alloc, name, &self.system.?, slot) catch |err| {
+        const info = save_state.saveSlot(self.alloc, self.io, name, &self.system.?, slot) catch |err| {
             std.log.err("save state slot {} failed: {s}", .{ slot + 1, @errorName(err) });
             return;
         };
@@ -946,12 +948,12 @@ pub const AppState = struct {
         const name = self.romDisplayName();
         defer self.alloc.free(name);
 
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
 
         std.log.info("Loading state from slot {} for \"{s}\"", .{ slot + 1, name });
 
-        save_state.loadSlot(self.alloc, name, &self.system.?, slot) catch |err| {
+        save_state.loadSlot(self.alloc, self.io, name, &self.system.?, slot) catch |err| {
             std.log.err("load state slot {} failed: {s}", .{ slot + 1, @errorName(err) });
         };
         if (self.isConnectedHost()) {
@@ -981,7 +983,7 @@ pub const AppState = struct {
         if (self.system) |*system| system.deinit();
 
         const rom_fullpath = if (builtin.abi.isAndroid()) path else blk: {
-            const cwd = try std.process.getCwdAlloc(self.alloc);
+            const cwd = try std.process.currentPathAlloc(self.io, self.alloc);
             defer self.alloc.free(cwd);
             const rom_fullpath = try std.fs.path.resolve(self.alloc, &.{ cwd, path });
 
@@ -992,10 +994,10 @@ pub const AppState = struct {
         std.log.debug("Reading file: {s}", .{rom_fullpath});
 
         if (self.rom_bytes) |bytes| self.alloc.free(bytes);
-        self.rom_bytes = try file.readFile(self.alloc, rom_fullpath);
+        self.rom_bytes = try file.readFile(self.alloc, self.io, rom_fullpath);
 
-        self.rom = try Rom.init(self.alloc, rom_fullpath, self.rom_bytes.?);
-        self.system = try System.init(self.alloc, &self.rom.?, .{});
+        self.rom = try Rom.init(self.alloc, self.io, rom_fullpath, self.rom_bytes.?);
+        self.system = try System.init(self.alloc, self.io, &self.rom.?, .{});
         self.system.?.reset();
         self.publishFrame(self.system.?.frame_buffer());
         self.emulation_running = true;
@@ -1008,7 +1010,7 @@ pub const AppState = struct {
 
         if (self.current_rom_path) |p| self.alloc.free(p);
         self.current_rom_path = self.alloc.dupe(u8, rom_fullpath) catch null;
-        self.game_start_time_ms = std.time.milliTimestamp();
+        self.game_start_time_ms = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
         self.refreshSaveStateInfo();
         try self.startEmulationThread();
     }
@@ -1051,7 +1053,7 @@ pub const AppState = struct {
         const name = self.romDisplayName();
         defer self.alloc.free(name);
 
-        const elapsed_ms = std.time.milliTimestamp() - self.game_start_time_ms;
+        const elapsed_ms = std.Io.Timestamp.now(self.io, .real).toMilliseconds() - self.game_start_time_ms;
         const elapsed_secs: u64 = if (elapsed_ms > 0) @intCast(@divFloor(elapsed_ms, 1000)) else 0;
 
         var existing_secs: u64 = 0;
@@ -1066,7 +1068,7 @@ pub const AppState = struct {
         self.history.save(name, path, existing_secs + elapsed_secs, pixels);
 
         // Reset so back-to-back saves (loadRom then deinit) don't double-count.
-        self.game_start_time_ms = std.time.milliTimestamp();
+        self.game_start_time_ms = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
     }
 
     // TODO: refactor this function
@@ -1083,7 +1085,7 @@ pub const AppState = struct {
         defer if (builtin.abi.isAndroid()) self.alloc.free(name);
 
         for (&self.save_state_info, 0..) |*info, slot| {
-            if (save_state.slotInfo(self.alloc, name, slot)) |slot_info| {
+            if (save_state.slotInfo(self.alloc, self.io, name, slot)) |slot_info| {
                 info.* = slot_info;
             } else |_| {}
         }
@@ -1112,8 +1114,8 @@ pub const AppState = struct {
         const restored = clonePersistedSettings(self.alloc, self.saved_settings) catch
             @panic("Failed to restore loaded settings");
 
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
 
         deinitEmulatorSettings(self.alloc, &self.settings);
         self.settings = restored;
@@ -1123,14 +1125,14 @@ pub const AppState = struct {
     }
 
     fn loadSettings(self: *Self) void {
-        settings.load(self.alloc, self.config_dir, &self.settings) catch |err|
+        settings.load(self.alloc, self.io, self.config_dir, &self.settings) catch |err|
             std.log.err("settings load failed: {s}", .{@errorName(err)});
         self.should_load_shader = self.settings.shader_preset_path != null;
         self.should_load_border_shader = self.settings.border_shader != .none;
     }
 
     fn saveSettingsImpl(self: *Self) !void {
-        try settings.save(self.alloc, self.config_dir, self.settings);
+        try settings.save(self.alloc, self.io, self.config_dir, self.settings);
     }
 
     fn snapshotSettings(self: *Self) !void {
@@ -1267,16 +1269,16 @@ pub const AppState = struct {
             try std.fs.path.join(self.alloc, &.{ root_path, self.shader_file_picker_current_dir });
         defer self.alloc.free(dir_path);
 
-        var dir = try std.fs.openDirAbsolute(dir_path, .{ .iterate = true });
-        defer dir.close();
+        var dir = try std.Io.Dir.openDirAbsolute(self.io, dir_path, .{ .iterate = true });
+        defer dir.close(self.io);
 
         try self.collectShaderFilePickerEntries(dir);
         std.mem.sort(ShaderFilePickerEntry, self.shader_file_picker_entries.items, {}, lessThanShaderFilePickerEntry);
     }
 
-    fn collectShaderFilePickerEntries(self: *Self, dir: std.fs.Dir) !void {
+    fn collectShaderFilePickerEntries(self: *Self, dir: std.Io.Dir) !void {
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(self.io)) |entry| {
             switch (entry.kind) {
                 .file => {
                     if (!std.mem.endsWith(u8, entry.name, ".slangp")) continue;
@@ -1335,14 +1337,14 @@ pub const AppState = struct {
         };
         defer self.alloc.free(root_path);
 
-        var dir = std.fs.openDirAbsolute(root_path, .{}) catch |err| switch (err) {
+        var dir = std.Io.Dir.openDirAbsolute(self.io, root_path, .{}) catch |err| switch (err) {
             error.FileNotFound => return false,
             else => {
                 std.log.warn("failed to inspect shader download path '{s}': {s}", .{ root_path, @errorName(err) });
                 return false;
             },
         };
-        dir.close();
+        dir.close(self.io);
         return true;
     }
 
@@ -1430,8 +1432,8 @@ pub const AppState = struct {
     pub fn togglePause(self: *Self) void {
         if (self.isConnectedClient()) return;
 
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
 
         self.paused = !self.paused;
 
@@ -1460,16 +1462,16 @@ pub const AppState = struct {
 
     pub fn toggleDebug(self: *Self) void {
         if (self.sessionActive()) return;
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
         self.step_mode = !self.step_mode;
         self.render_debug_ui = !self.render_debug_ui;
     }
 
     pub fn toggleStepMode(self: *Self) void {
         if (self.sessionActive()) return;
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
         self.step_mode = !self.step_mode;
     }
 
@@ -1500,8 +1502,8 @@ pub const AppState = struct {
         self.clearSessionPresentation();
 
         const framebuffer = blk: {
-            self.emulation_lock.lockShared();
-            defer self.emulation_lock.unlockShared();
+            self.emulation_lock.lockSharedUncancelable(self.io);
+            defer self.emulation_lock.unlockShared(self.io);
             break :blk try self.alloc.dupe(u8, self.system.?.frame_buffer());
         };
         errdefer self.alloc.free(framebuffer);
@@ -1535,8 +1537,8 @@ pub const AppState = struct {
 
         self.netplay.session_preview_name = preview_name;
 
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
 
         self.netplay.active_session_role = .host;
         self.netplay.epoch = 0;
@@ -1554,8 +1556,8 @@ pub const AppState = struct {
         self.clearSessionPresentation();
         try self.netplay.session_manager.connect(code);
 
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
 
         self.netplay.active_session_role = .client;
 
@@ -1732,7 +1734,7 @@ pub const AppState = struct {
             return;
         }
 
-        const now = std.time.milliTimestamp();
+        const now = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
         if (self.netplay.connection_stats_sample_time_ms != 0 and
             now - self.netplay.connection_stats_sample_time_ms < CONNECTION_STATS_SAMPLE_MS)
         {
@@ -1758,8 +1760,8 @@ pub const AppState = struct {
 
         std.log.info("netplay: capturing host state at frame boundary for client join", .{});
 
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
 
         self.netplay.resyncing = true;
         self.netplay.ready = false;
@@ -1830,8 +1832,8 @@ pub const AppState = struct {
                 try self.installNetworkGame(data);
             },
             .ready => |ready| {
-                self.emulation_lock.lock();
-                defer self.emulation_lock.unlock();
+                self.emulation_lock.lockUncancelable(self.io);
+                defer self.emulation_lock.unlock(self.io);
 
                 try netplay_protocol.validateReady(
                     self.netplay.epoch,
@@ -1856,8 +1858,8 @@ pub const AppState = struct {
                 self.netplay.session_manager.markConnected();
             },
             .ack => |ack| {
-                self.emulation_lock.lock();
-                defer self.emulation_lock.unlock();
+                self.emulation_lock.lockUncancelable(self.io);
+                defer self.emulation_lock.unlock(self.io);
 
                 switch (try netplay_protocol.validateAcknowledgement(
                     self.netplay.epoch,
@@ -1911,7 +1913,7 @@ pub const AppState = struct {
                     if (self.system) |*system| system.setAudioPaused(paused);
                 },
                 .speed => |value| {
-                    const speed = std.meta.intToEnum(EmulationSpeed, value) catch return error.InvalidEmulationSpeed;
+                    const speed = std.enums.fromInt(EmulationSpeed, value) orelse return error.InvalidEmulationSpeed;
 
                     std.log.info("netplay: applying host emulation speed {s}", .{@tagName(speed)});
 
@@ -1977,7 +1979,7 @@ pub const AppState = struct {
         var committed = false;
         errdefer if (!committed) self.alloc.free(rom_bytes);
 
-        var rom = try Rom.initWithOptions(self.alloc, data.name, rom_bytes, .{ .disable_battery_ram = true });
+        var rom = try Rom.initWithOptions(self.alloc, self.io, data.name, rom_bytes, .{ .disable_battery_ram = true });
         errdefer if (!committed) rom.deinit();
 
         const new_system = try self.alloc.create(System);
@@ -1988,7 +1990,7 @@ pub const AppState = struct {
             self.alloc.destroy(new_system);
         };
 
-        new_system.* = try System.init(self.alloc, &rom, .{});
+        new_system.* = try System.init(self.alloc, self.io, &rom, .{});
         new_system_initialized = true;
         try new_system.loadState(snapshot);
 
@@ -2058,8 +2060,8 @@ pub const AppState = struct {
         if (self.netplay.active_session_role != .client or !self.netplay.network_rom) return error.InvalidSessionState;
         try netplay_protocol.validateNext(self.netplay.epoch, self.netplay.frame + 1, frame.epoch, frame.frame);
 
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
 
         self.system.?.applyControllerSnapshot(.{ .player1 = @bitCast(frame.player1), .player2 = @bitCast(frame.player2) });
         self.system.?.run_frame();
@@ -2215,8 +2217,8 @@ pub const AppState = struct {
             self.alloc.destroy(snapshot);
         }
 
-        self.emulation_lock.lock();
-        defer self.emulation_lock.unlock();
+        self.emulation_lock.lockUncancelable(self.io);
+        defer self.emulation_lock.unlock(self.io);
 
         try self.system.?.loadState(snapshot);
 
@@ -2242,7 +2244,7 @@ pub const AppState = struct {
     }
 
     fn recoverDesyncLocked(self: *Self) !void {
-        const now = std.time.timestamp();
+        const now = std.Io.Timestamp.now(self.io, .real).toSeconds();
 
         self.netplay.rebase_times[0] = self.netplay.rebase_times[1];
         self.netplay.rebase_times[1] = self.netplay.rebase_times[2];
@@ -2271,7 +2273,7 @@ pub const AppState = struct {
             self.unloadCurrentRomInternal();
             if (builtin.abi.isAndroid()) self.ui.setWindowFullscreen(false);
         } else {
-            self.emulation_lock.lock();
+            self.emulation_lock.lockUncancelable(self.io);
         }
 
         if (self.netplay.client_saved_speed) |speed| self.settings.emulation_speed = speed;
@@ -2285,7 +2287,7 @@ pub const AppState = struct {
 
         if (self.system) |*system| system.setAudioPaused(false);
 
-        if (!stopped_client_game) self.emulation_lock.unlock();
+        if (!stopped_client_game) self.emulation_lock.unlock(self.io);
 
         if (was_host) {
             if (builtin.abi.isAndroid()) {
@@ -2316,7 +2318,7 @@ fn shaderDownloadThreadMain(app_state: *AppState) void {
         .total_bytes = &app_state.shader_download_total_bytes,
     };
 
-    shader_download.downloadAndExtract(root_path, progress) catch |err| {
+    shader_download.downloadAndExtract(app_state.io, root_path, progress) catch |err| {
         app_state.shader_download_result = err;
         progress.setState(.failed);
         std.log.err("shader download failed: {s}", .{@errorName(err)});

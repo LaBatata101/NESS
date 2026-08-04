@@ -78,7 +78,7 @@ fn rememberError(error_handle: ?*c.IrohError) Error {
     defer c.iroh_error_free(handle);
 
     const kind_value: u32 = @intCast(c.iroh_error_kind(handle));
-    last_error_kind = std.meta.intToEnum(ErrorKind, kind_value) catch .internal;
+    last_error_kind = std.enums.fromInt(ErrorKind, kind_value) orelse .internal;
 
     const message = c.iroh_error_message(handle);
     defer c.iroh_owned_bytes_free(message);
@@ -337,7 +337,7 @@ pub const Connection = struct {
         try check(c.iroh_connection_stats(self.handle, &result, &error_handle), &error_handle);
         return .{
             .has_selected_path = result.has_selected_path,
-            .route = std.meta.intToEnum(ConnectionRoute, @as(u32, @intCast(result.route))) catch .unknown,
+            .route = std.enums.fromInt(ConnectionRoute, @as(u32, @intCast(result.route))) orelse .unknown,
             .rtt_ms = result.rtt_ms,
             .udp_tx_datagrams = result.udp_tx_datagrams,
             .udp_tx_bytes = result.udp_tx_bytes,

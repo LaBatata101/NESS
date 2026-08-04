@@ -16,6 +16,7 @@ pub const Settings = struct {
 
 pub const System = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
 
     bus: *Bus,
     cpu: *CPU,
@@ -24,8 +25,8 @@ pub const System = struct {
 
     settings: Settings,
 
-    trace_file: ?std.fs.File,
-    trace_file_writer: ?std.fs.File.Writer,
+    trace_file: ?std.Io.File,
+    trace_file_writer: ?std.Io.File.Writer,
     trace_file_buffer: [4096]u8,
 
     const Self = @This();
@@ -47,29 +48,30 @@ pub const System = struct {
         player2: ControllerButton = .{},
     };
 
-    pub fn init(allocator: std.mem.Allocator, rom: *Rom, settings: Settings) !Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, rom: *Rom, settings: Settings) !Self {
         const cpu = try allocator.create(CPU);
         const apu = try allocator.create(APU);
         const ppu = try allocator.create(PPU);
         const bus = try allocator.create(Bus);
 
         ppu.* = PPU.init(rom);
-        apu.* = try APU.init(allocator, try SDLAudioOut.init(allocator), rom);
+        apu.* = try APU.init(allocator, try SDLAudioOut.init(allocator, io), rom);
         bus.* = Bus.init(rom, ppu, apu);
         cpu.* = CPU.init(bus);
 
         apu.device.disable = settings.disable_audio;
 
-        var trace_file: ?std.fs.File = null;
-        var trace_file_writer: ?std.fs.File.Writer = null;
+        var trace_file: ?std.Io.File = null;
+        var trace_file_writer: ?std.Io.File.Writer = null;
         // const trace_file_buffer = try allocator.alloc(u8, 4096);
         if (settings.trace_cpu) {
-            trace_file = try std.fs.cwd().createFile("cpu.trace", .{});
-            trace_file_writer = .initStreaming(trace_file.?, &.{});
+            trace_file = try std.Io.Dir.cwd().createFile(io, "cpu.trace", .{});
+            trace_file_writer = trace_file.?.writerStreaming(io, &.{});
         }
 
         return .{
             .allocator = allocator,
+            .io = io,
             .bus = bus,
             .cpu = cpu,
             .ppu = ppu,
@@ -90,7 +92,7 @@ pub const System = struct {
         self.allocator.destroy(self.bus);
 
         if (self.settings.trace_cpu) {
-            self.trace_file.?.close();
+            self.trace_file.?.close(self.io);
         }
     }
 

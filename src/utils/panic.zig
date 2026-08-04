@@ -28,18 +28,17 @@ pub fn customPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
         }
     }
 
-    if (std.debug.getSelfDebugInfo()) |debug_info| {
-        std.debug.writeCurrentStackTrace(trace_writer, debug_info, .no_color, first_trace_addr) catch |err| {
-            writer.print("Unable to dump stack trace: {s}\n", .{@errorName(err)}) catch {};
-        };
-        const stacktrace = trace.written();
-        if (stacktrace.len > 1024) {
-            short_msg_writer.print("Stacktrace:\n{s}...\n", .{stacktrace[0..1024]}) catch {};
-        }
-        writer.print("Stacktrace:\n{s}\n", .{stacktrace}) catch {};
-    } else |err| {
-        writer.print("Unable to dump stack trace:\n\tUnable to open debug info: {s}\n", .{@errorName(err)}) catch {};
+    std.debug.writeCurrentStackTrace(.{
+        .first_address = first_trace_addr,
+        .allow_unsafe_unwind = true,
+    }, .{ .writer = trace_writer, .mode = .no_color }) catch |err| {
+        writer.print("Unable to dump stack trace: {s}\n", .{@errorName(err)}) catch {};
+    };
+    const stacktrace = trace.written();
+    if (stacktrace.len > 1024) {
+        short_msg_writer.print("Stacktrace:\n{s}...\n", .{stacktrace[0..1024]}) catch {};
     }
+    writer.print("Stacktrace:\n{s}\n", .{stacktrace}) catch {};
 
     const short_panic_msg = alloc.dupeZ(u8, short_msg.written()) catch unreachable;
     defer alloc.free(short_panic_msg);
