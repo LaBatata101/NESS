@@ -116,7 +116,9 @@ pub fn main(init: std.process.Init) !void {
 
     const total_tests = pass + fail;
     const status = if (fail == 0) Status.pass else Status.fail;
-    Printer.status(status, "\n{d} of {d} test{s} passed\n", .{ pass, total_tests, if (total_tests != 1) "s" else "" });
+    if (total_tests > 0) {
+        Printer.status(status, "\n{d} of {d} test{s} passed\n", .{ pass, total_tests, if (total_tests != 1) "s" else "" });
+    }
     if (skip > 0) {
         Printer.status(.skip, "{d} test{s} skipped\n", .{ skip, if (skip != 1) "s" else "" });
     }
@@ -217,7 +219,9 @@ const SlowTracker = struct {
     fn display(self: *SlowTracker) !void {
         var slowest = self.slowest;
         const count = slowest.count();
-        Printer.fmt("Slowest {d} test{s}: \n", .{ count, if (count != 1) "s" else "" });
+        if (count > 0) {
+            Printer.fmt("Slowest {d} test{s}: \n", .{ count, if (count != 1) "s" else "" });
+        }
         while (slowest.popMin()) |info| {
             const ms = @as(f64, @floatFromInt(info.ns)) / 1_000_000.0;
             Printer.fmt("  {d:.2}ms\t{s}\n", .{ ms, info.name });
