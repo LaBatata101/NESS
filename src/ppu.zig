@@ -924,10 +924,14 @@ pub const PPU = struct {
         return .{ palette, pixel };
     }
 
-    fn fetch_tile_data(self: *Self) void {
-        switch (self.cycle & 0x07) {
+    inline fn fetch_tile_data(self: *Self) void {
+        const slot: u3 = @truncate(self.cycle);
+        if (slot & 1 == 0) return;
+
+        const phase: u2 = @truncate(slot >> 1);
+        switch (phase) {
             // Fetch the next background tile ID
-            1 => {
+            0 => { // cycle 1
                 const tile_addr = 0x2000 | (self.addr_register.addr() & 0x0FFF);
                 self.bg_data.next_tile_id = self.vram_read(tile_addr);
                 self.bg_data.tile_addr = self.ctrl_register.bg_pattern_addr() +
@@ -935,7 +939,7 @@ pub const PPU = struct {
                     self.addr_register.fine_y;
             },
             // Fetch the next background tile attribute.
-            3 => {
+            1 => { // cycle 3
                 const attr_addr = 0x23C0 |
                     (@as(u16, self.addr_register.nametable_y) << 11) |
                     (@as(u16, self.addr_register.nametable_x) << 10) |
@@ -944,15 +948,14 @@ pub const PPU = struct {
                 const shift = ((self.addr_register.coarse_y << 1) & 0b100) | (self.addr_register.coarse_x & 0b10);
                 self.bg_data.next_tile_attr = std.math.shr(u8, self.vram_read(attr_addr), shift);
             },
-            5 => {
+            2 => { // cycle 5
                 // Fetch the next background tile LSB bit plane from the pattern memory.
                 self.bg_data.next_tile_lo = self.chr_read(self.bg_data.tile_addr);
             },
-            7 => {
+            3 => { // cycle 7
                 // Fetch the next background tile MSB bit plane from the pattern memory.
                 self.bg_data.next_tile_hi = self.chr_read(self.bg_data.tile_addr + 8);
             },
-            else => {},
         }
     }
 
