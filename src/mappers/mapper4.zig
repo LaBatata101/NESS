@@ -27,7 +27,9 @@ pub const Mapper4 = struct {
     prg_ram: Ram,
 
     /// 8 bank registers (R0-R7) + 2 fixed banks (second-to-last and last PRG banks)
-    bank_registers: [10]usize,
+    bank_registers: [10]u32,
+    /// Effective base offset for each 1KB PPU CHR page.
+    chr_page_offsets: [8]u32,
     /// Which bank register to update on next write to $8001
     bank_select: u8,
     /// PRG ROM bank mode (false = $8000 swappable, true = $C000 swappable)
@@ -57,7 +59,7 @@ pub const Mapper4 = struct {
     const Self = @This();
 
     pub const Snapshot = struct {
-        bank_registers: [10]usize,
+        bank_registers: [10]u32,
         bank_select: u8,
         prg_inversion: bool,
         chr_inversion: bool,
@@ -95,10 +97,10 @@ pub const Mapper4 = struct {
         else
             (try VolatileRam.init(allocator, params.prg_ram_size)).as_ram();
 
-        var bank_registers = [_]usize{0} ** 10;
+        var bank_registers = [_]u32{0} ** 10;
 
         // Initialize fixed banks (second-to-last and last 8KB PRG banks)
-        const num_banks = params.prg_rom.len / 0x2000;
+        const num_banks: u32 = @intCast(params.prg_rom.len / 0x2000);
         bank_registers[8] = (num_banks - 2) * 0x2000;
         bank_registers[9] = (num_banks - 1) * 0x2000;
 
@@ -109,6 +111,7 @@ pub const Mapper4 = struct {
             .chr_is_ram = chr_is_ram,
             .prg_ram = prg_ram,
             .bank_registers = bank_registers,
+            .chr_page_offsets = [_]u32{0} ** 8,
             .bank_select = 0,
             .prg_inversion = false,
             .chr_inversion = false,
@@ -122,6 +125,7 @@ pub const Mapper4 = struct {
             .mirroring_mode = params.mirroring_mode,
             .allocator = allocator,
         };
+        self.update_chr_page_offsets();
 
         return self;
     }
@@ -191,23 +195,27 @@ pub const Mapper4 = struct {
                     if (self.bank_select >= 6) {
                         // PRG ROM bank (8KB, ignore top 2 bits)
                         self.bank_registers[self.bank_select] =
-                            ((@as(usize, value & 0x3F) << 13) % self.prg_rom.len);
+                            @intCast((@as(u32, value & 0x3F) << 13) % self.prg_rom.len);
                     } else if (self.bank_select <= 1) {
                         // 2KB CHR bank - can only select even banks
                         const chr_len = if (self.chr_is_ram) self.chr_ram.len else self.chr_rom.len;
-                        self.bank_registers[self.bank_select] =
-                            ((@as(usize, value & 0xFE) << 10) % chr_len);
+                        self.bank_registers[self.bank_select] = @intCast((@as(u32, value & 0xFE) << 10) % chr_len);
+                        self.update_chr_page_offsets();
                     } else {
                         // 1KB CHR bank
                         const chr_len = if (self.chr_is_ram) self.chr_ram.len else self.chr_rom.len;
-                        self.bank_registers[self.bank_select] =
-                            ((@as(usize, value) << 10) % chr_len);
+                        self.bank_registers[self.bank_select] = @intCast((@as(u32, value) << 10) % chr_len);
+                        self.update_chr_page_offsets();
                     }
                 } else {
                     // $8000 (even) - Bank select
                     self.bank_select = value & 0x07;
                     self.prg_inversion = (value & 0x40) != 0;
-                    self.chr_inversion = (value & 0x80) != 0;
+                    const chr_inversion = (value & 0x80) != 0;
+                    if (chr_inversion != self.chr_inversion) {
+                        self.chr_inversion = chr_inversion;
+                        self.update_chr_page_offsets();
+                    }
                 }
             },
             0xA000 => {
@@ -254,25 +262,43 @@ pub const Mapper4 = struct {
     }
 
     fn chr_read(self: *Self, addr: u16) u8 {
-        const bank_index: u8, const bank_size: u16 = switch (addr) {
-            0x0000...0x03FF => if (self.chr_inversion) .{ 2, 0x400 } else .{ 0, 0x800 },
-            0x0400...0x07FF => if (self.chr_inversion) .{ 3, 0x400 } else .{ 0, 0x800 },
-            0x0800...0x0BFF => if (self.chr_inversion) .{ 4, 0x400 } else .{ 1, 0x800 },
-            0x0C00...0x0FFF => if (self.chr_inversion) .{ 5, 0x400 } else .{ 1, 0x800 },
-            0x1000...0x13FF => if (self.chr_inversion) .{ 0, 0x800 } else .{ 2, 0x400 },
-            0x1400...0x17FF => if (self.chr_inversion) .{ 0, 0x800 } else .{ 3, 0x400 },
-            0x1800...0x1BFF => if (self.chr_inversion) .{ 1, 0x800 } else .{ 4, 0x400 },
-            0x1C00...0x1FFF => if (self.chr_inversion) .{ 1, 0x800 } else .{ 5, 0x400 },
-            else => std.debug.panic("Invalid address: 0x{X:04}\n", .{addr}),
-        };
-
-        const base = self.bank_registers[bank_index];
-        const offset = (addr % bank_size);
+        if (addr >= 0x2000) {
+            std.debug.panic("Invalid address: 0x{X:04}\n", .{addr});
+        }
+        const page: usize = @intCast(addr >> 10);
+        const offset: usize = @intCast(addr & 0x03FF);
+        const mapped_addr = self.chr_page_offsets[page] + offset;
 
         if (self.chr_is_ram) {
-            return self.chr_ram[base + offset];
+            return self.chr_ram[mapped_addr];
         } else {
-            return self.chr_rom[base + offset];
+            return self.chr_rom[mapped_addr];
+        }
+    }
+
+    fn update_chr_page_offsets(self: *Self) void {
+        if (self.chr_inversion) {
+            self.chr_page_offsets = .{
+                self.bank_registers[2],
+                self.bank_registers[3],
+                self.bank_registers[4],
+                self.bank_registers[5],
+                self.bank_registers[0],
+                self.bank_registers[0] + 0x400,
+                self.bank_registers[1],
+                self.bank_registers[1] + 0x400,
+            };
+        } else {
+            self.chr_page_offsets = .{
+                self.bank_registers[0],
+                self.bank_registers[0] + 0x400,
+                self.bank_registers[1],
+                self.bank_registers[1] + 0x400,
+                self.bank_registers[2],
+                self.bank_registers[3],
+                self.bank_registers[4],
+                self.bank_registers[5],
+            };
         }
     }
 
@@ -340,6 +366,7 @@ pub const Mapper4 = struct {
         self.bank_select = data.bank_select;
         self.prg_inversion = data.prg_inversion;
         self.chr_inversion = data.chr_inversion;
+        self.update_chr_page_offsets();
         self.irq_flag = data.irq_flag;
         self.irq_counter = data.irq_counter;
         self.irq_reload_flag = data.irq_reload_flag;
@@ -568,11 +595,35 @@ test "Mapper4 CHR banking" {
     });
     defer mapper.deinit();
 
-    // Set 2KB bank 0 (R0) to bank 4 (will use banks 4-5)
-    mapper.prg_rom_write(0x8000, 0);
-    mapper.prg_rom_write(0x8001, 4);
+    // R0 and R1 select two adjacent 1KB pages; R2-R5 select one each.
+    const banks = [_]u8{ 4, 8, 12, 13, 14, 15 };
+    for (banks, 0..) |bank, register| {
+        mapper.prg_rom_write(0x8000, @intCast(register));
+        mapper.prg_rom_write(0x8001, bank);
+    }
 
-    // Without CHR inversion, R0 maps to $0000-$07FF
-    try std.testing.expectEqual(@as(u8, 4), mapper.chr_read(0x0000));
-    try std.testing.expectEqual(@as(u8, 4), mapper.chr_read(0x03FF));
+    const normal_pages = [_]u8{ 4, 5, 8, 9, 12, 13, 14, 15 };
+    for (normal_pages, 0..) |bank, page| {
+        const page_start = page * 0x400;
+        try std.testing.expectEqual(bank, mapper.chr_read(@intCast(page_start)));
+        try std.testing.expectEqual(bank, mapper.chr_read(@intCast(page_start + 0x3FF)));
+    }
+
+    var snapshot = try mapper.saveState(allocator);
+    defer snapshot.deinit(allocator);
+
+    // CHR inversion swaps the two 2KB windows with the four 1KB windows.
+    mapper.prg_rom_write(0x8000, 0x80);
+    const inverted_pages = [_]u8{ 12, 13, 14, 15, 4, 5, 8, 9 };
+    for (inverted_pages, 0..) |bank, page| {
+        const page_start = page * 0x400;
+        try std.testing.expectEqual(bank, mapper.chr_read(@intCast(page_start)));
+        try std.testing.expectEqual(bank, mapper.chr_read(@intCast(page_start + 0x3FF)));
+    }
+
+    // Effective page offsets are derived state and must be rebuilt on load.
+    try mapper.loadState(snapshot);
+    for (normal_pages, 0..) |bank, page| {
+        try std.testing.expectEqual(bank, mapper.chr_read(@intCast(page * 0x400)));
+    }
 }

@@ -209,7 +209,7 @@ fn writeCanonicalMapper(writer: *std.Io.Writer, snapshot: Mapper.Snapshot) !void
         },
         .mapper4 => |value| {
             try writeCanonical(writer, u8, 4);
-            for (value.bank_registers) |bank| try writeCanonical(writer, u64, bank);
+            for (value.bank_registers) |bank| try writeCanonical(writer, u32, bank);
             try writeCanonical(writer, u8, value.bank_select);
             try writeCanonical(writer, bool, value.prg_inversion);
             try writeCanonical(writer, bool, value.chr_inversion);
@@ -265,8 +265,8 @@ fn readCanonicalMapper(alloc: std.mem.Allocator, reader: *std.Io.Reader) !Mapper
             .prg_ram = try readCanonicalSlice(alloc, reader),
         } },
         4 => blk: {
-            var banks: [10]usize = undefined;
-            for (&banks) |*bank| bank.* = @intCast(try readCanonical(alloc, u64, reader));
+            var banks: [10]u32 = undefined;
+            for (&banks) |*bank| bank.* = @intCast(try readCanonical(alloc, u32, reader));
             const bank_select = try readCanonical(alloc, u8, reader);
             const prg_inversion = try readCanonical(alloc, bool, reader);
             const chr_inversion = try readCanonical(alloc, bool, reader);

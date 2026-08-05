@@ -209,7 +209,7 @@ fn writeMapperSnapshot(writer: *std.Io.Writer, snapshot: Mapper.Snapshot) !void 
         },
         .mapper4 => |value| {
             try writeInt(writer, u8, 4);
-            try writeValue(writer, [10]usize, value.bank_registers);
+            try writeValue(writer, [10]u32, value.bank_registers);
             try writeValue(writer, u8, value.bank_select);
             try writeValue(writer, bool, value.prg_inversion);
             try writeValue(writer, bool, value.chr_inversion);
@@ -261,7 +261,7 @@ fn readMapperSnapshot(alloc: std.mem.Allocator, reader: *std.Io.Reader) !Mapper.
         },
         4 => .{
             .mapper4 = .{
-                .bank_registers = try readValue([10]usize, reader),
+                .bank_registers = try readValue([10]u32, reader),
                 .bank_select = try readValue(u8, reader),
                 .prg_inversion = try readValue(bool, reader),
                 .chr_inversion = try readValue(bool, reader),
