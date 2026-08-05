@@ -229,6 +229,8 @@ pub const PPU = struct {
     rom: *Rom,
     /// Internal memory to keep palette tables used by a screen
     palette_table: [32]u8,
+    /// Palette RAM resolved to RGBA colors, including mirroring and greyscale.
+    resolved_palette: [32]render.Color,
     /// 2 KiB of space to hold background information, can hold two nametables.
     vram: [2048]u8,
 
@@ -378,6 +380,7 @@ pub const PPU = struct {
         return .{
             .rom = rom,
             .palette_table = [_]u8{0} ** 32,
+            .resolved_palette = [_]render.Color{render.SYSTEM_PALETTE[0]} ** 32,
             .vram = [_]u8{0} ** 2048,
             .write_toggle = false,
             .ctrl_register = .{},
@@ -416,6 +419,7 @@ pub const PPU = struct {
 
     pub fn reset(self: *Self) void {
         @memset(&self.palette_table, 0);
+        self.resolved_palette = [_]render.Color{render.SYSTEM_PALETTE[0]} ** 32;
         @memset(&self.vram, 0);
         @memset(&self.oam_data_register, 0);
         self.addr_register = .{};
@@ -499,6 +503,7 @@ pub const PPU = struct {
         self.vram = snapshot.vram;
         self.ctrl_register = snapshot.ctrl_register;
         self.mask_register = snapshot.mask_register;
+        self.refresh_resolved_palette();
         self.status_register = snapshot.status_register;
         self.oam_addr_register = snapshot.oam_addr_register;
         self.oam_data_register = snapshot.oam_data_register;
@@ -661,10 +666,7 @@ pub const PPU = struct {
             const color = self.get_color(palette, pixel);
 
             const idx = self.current_frame_buffer_index;
-            self.frame_buffer.data[idx] = color.r;
-            self.frame_buffer.data[idx + 1] = color.g;
-            self.frame_buffer.data[idx + 2] = color.b;
-            self.frame_buffer.data[idx + 3] = 255;
+            self.frame_buffer.data[idx..][0..4].* = .{ color.r, color.g, color.b, color.a };
 
             self.current_frame_buffer_index += 4;
         }
@@ -1019,16 +1021,32 @@ pub const PPU = struct {
     }
 
     fn get_color(self: *Self, palette_index: u8, pixel_index: u8) render.Color {
-        // "palette_index * 4" - Each palette is 4 bytes in size
-        // "pixel_index"        - Each pixel index is either 0, 1, 2 or 3
-        // "& 0x3F"       - Stops us reading beyond the bounds of the SYSTEM_PALETTE array
-        const addr = 0x1F & (@as(u16, palette_index * 4) + pixel_index);
-        const final_addr = switch (addr) {
-            0x10, 0x14, 0x18, 0x1C => addr - 0x10,
-            else => addr,
-        };
-        const color_idx = self.palette_table[final_addr] & if (self.mask_register.greyscale) @as(u8, 0x30) else 0x3F;
-        return render.SYSTEM_PALETTE[color_idx];
+        const addr: u5 = @truncate((@as(u16, palette_index) << 2) + pixel_index);
+        return self.resolved_palette[addr];
+    }
+
+    fn refresh_resolved_palette(self: *Self) void {
+        const color_mask: u8 = if (self.mask_register.greyscale) 0x30 else 0x3F;
+        for (0..self.resolved_palette.len) |addr| {
+            const palette_addr = switch (addr) {
+                0x10, 0x14, 0x18, 0x1C => addr - 0x10,
+                else => addr,
+            };
+            const color_idx = self.palette_table[palette_addr] & color_mask;
+            self.resolved_palette[addr] = render.SYSTEM_PALETTE[color_idx];
+        }
+    }
+
+    fn refresh_resolved_palette_entry(self: *Self, palette_addr: usize) void {
+        const color_mask: u8 = if (self.mask_register.greyscale) 0x30 else 0x3F;
+        const color_idx = self.palette_table[palette_addr] & color_mask;
+        const color = render.SYSTEM_PALETTE[color_idx];
+        self.resolved_palette[palette_addr] = color;
+
+        // Universal background entries are mirrored into the sprite palettes.
+        if (palette_addr < 0x10 and palette_addr & 0x03 == 0) {
+            self.resolved_palette[palette_addr + 0x10] = color;
+        }
     }
 
     fn ppu_read(self: *Self, addr: u16) u8 {
@@ -1337,6 +1355,7 @@ pub const PPU = struct {
                 palette_addr -= 0x10;
             }
             self.palette_table[palette_addr] = value;
+            self.refresh_resolved_palette_entry(palette_addr);
         } else {
             std.debug.panic("PPU: unexpected access to mirrored space 0x{X:04} while writing\n", .{addr});
         }
@@ -1389,7 +1408,11 @@ pub const PPU = struct {
     /// Bit 7: Emphasize blue
     /// ```
     fn mask_write(self: *Self, value: u8) void {
+        const old_greyscale = self.mask_register.greyscale;
         self.mask_register = @bitCast(value);
+        if (old_greyscale != self.mask_register.greyscale) {
+            self.refresh_resolved_palette();
+        }
     }
 
     /// Writes a byte to the `OAMADDR` register (`0x2003`) to set the OAM write address.
@@ -1528,6 +1551,46 @@ fn flip_byte(byte: u8) u8 {
     result = (result & 0xCC) >> 2 | (result & 0x33) << 2;
     result = (result & 0xAA) >> 1 | (result & 0x55) << 1;
     return result;
+}
+
+test "resolved palette follows writes, greyscale, and state loads" {
+    const alloc = std.testing.allocator;
+    const TestRom = @import("rom.zig").TestRom;
+    var test_rom = TestRom.init(alloc, &[_]u8{});
+    defer test_rom.deinit();
+
+    var ppu = PPU.init(&test_rom.rom);
+
+    ppu.addr_write(0x3F);
+    ppu.addr_write(0x00);
+    ppu.data_write(0x21);
+    try std.testing.expectEqual(render.SYSTEM_PALETTE[0x21], ppu.get_color(0, 0));
+    try std.testing.expectEqual(render.SYSTEM_PALETTE[0x21], ppu.get_color(4, 0));
+
+    // Writes through a mirrored address update both logical palette entries.
+    ppu.addr_write(0x3F);
+    ppu.addr_write(0x10);
+    ppu.data_write(0x12);
+    try std.testing.expectEqual(render.SYSTEM_PALETTE[0x12], ppu.get_color(0, 0));
+    try std.testing.expectEqual(render.SYSTEM_PALETTE[0x12], ppu.get_color(4, 0));
+
+    ppu.addr_write(0x3F);
+    ppu.addr_write(0x11);
+    ppu.data_write(0x2F);
+    ppu.mask_write(0x01);
+    try std.testing.expectEqual(render.SYSTEM_PALETTE[0x20], ppu.get_color(4, 1));
+
+    var snapshot = try ppu.saveState(alloc);
+    defer snapshot.deinit(alloc);
+
+    ppu.mask_write(0x00);
+    ppu.addr_write(0x3F);
+    ppu.addr_write(0x11);
+    ppu.data_write(0x01);
+    try std.testing.expectEqual(render.SYSTEM_PALETTE[0x01], ppu.get_color(4, 1));
+
+    ppu.loadState(&snapshot);
+    try std.testing.expectEqual(render.SYSTEM_PALETTE[0x20], ppu.get_color(4, 1));
 }
 
 test "PPU VRAM write" {
