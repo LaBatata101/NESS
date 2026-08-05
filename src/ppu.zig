@@ -286,6 +286,8 @@ pub const PPU = struct {
     /// first or second write. Clears on reads of `PPUSTATUS`. Sometimes called the 'write latch' or 'write toggle'.
     write_toggle: bool,
     fine_x: u8,
+    fine_x_pattern_mask: u16,
+    fine_x_attribute_mask: u8,
 
     /// `0x4014` - write: `Sprite DMA`
     /// OAMDMA is a CPU register that suspends the CPU so it can quickly copy a page of CPU memory to PPU OAM using DMA.
@@ -401,6 +403,8 @@ pub const PPU = struct {
             .bg_data = .{},
             .sprite_data = .{},
             .fine_x = 0,
+            .fine_x_pattern_mask = 0x8000,
+            .fine_x_attribute_mask = 0x80,
             .frame_buffer = Frame.init(),
             .frame_complete = false,
             .global_cycle = 0,
@@ -428,6 +432,8 @@ pub const PPU = struct {
         self.cycle = 0;
         self.dynamic_latch = 0;
         self.fine_x = 0;
+        self.fine_x_pattern_mask = 0x8000;
+        self.fine_x_attribute_mask = 0x80;
         self.frame_buffer.clear();
         self.frame_complete = false;
         self.global_cycle = 0;
@@ -512,6 +518,7 @@ pub const PPU = struct {
         self.tmp_addr = snapshot.tmp_addr;
         self.write_toggle = snapshot.write_toggle;
         self.fine_x = snapshot.fine_x;
+        self.refresh_fine_x_masks();
         self.oam_dma_addr = snapshot.oam_dma_addr;
         self.internal_data_buf = snapshot.internal_data_buf;
         self.cycle = snapshot.cycle;
@@ -662,8 +669,8 @@ pub const PPU = struct {
 
         // Render the pixel if we're not on the pre-render scanline.
         if (self.scanline != PRE_RENDER_SCANLINE) {
-            const palette, const pixel = self.render_pixel();
-            const color = self.get_color(palette, pixel);
+            const palette_addr = self.render_pixel();
+            const color = self.resolved_palette[palette_addr];
 
             const idx = self.current_frame_buffer_index;
             self.frame_buffer.data[idx..][0..4].* = .{ color.r, color.g, color.b, color.a };
@@ -866,16 +873,16 @@ pub const PPU = struct {
         }
     }
 
-    fn render_pixel(self: *Self) struct { u8, u8 } {
+    fn render_pixel(self: *Self) u5 {
         var bg_pixel: u8 = 0; // 2-bit pixel to be rendered
         var bg_palette: u8 = 0; // 3-bit index of the palette the pixel indexes
         if (self.mask_register.render_background and (self.mask_register.render_background_left or self.cycle > 8)) {
-            const pixel_lo = (self.bg_data.shifter_pattern_lo >> @as(u4, @intCast(15 - self.fine_x))) & 1;
-            const pixel_hi = (self.bg_data.shifter_pattern_hi >> @as(u4, @intCast(15 - self.fine_x))) & 1;
-            bg_pixel = @truncate((pixel_hi << 1) | pixel_lo);
+            const pixel_lo: u8 = @intFromBool(self.bg_data.shifter_pattern_lo & self.fine_x_pattern_mask != 0);
+            const pixel_hi: u8 = @intFromBool(self.bg_data.shifter_pattern_hi & self.fine_x_pattern_mask != 0);
+            bg_pixel = (pixel_hi << 1) | pixel_lo;
 
-            const palette_lo = (self.bg_data.shifter_attr_lo >> @as(u3, @intCast(7 - self.fine_x))) & 1;
-            const palette_hi = (self.bg_data.shifter_attr_hi >> @as(u3, @intCast(7 - self.fine_x))) & 1;
+            const palette_lo: u8 = @intFromBool(self.bg_data.shifter_attr_lo & self.fine_x_attribute_mask != 0);
+            const palette_hi: u8 = @intFromBool(self.bg_data.shifter_attr_hi & self.fine_x_attribute_mask != 0);
             bg_palette = (palette_hi << 1) | palette_lo;
         }
 
@@ -914,16 +921,13 @@ pub const PPU = struct {
             }
         }
 
-        var pixel: u8 = 0;
-        var palette: u8 = 0;
         if (sprite_pixel != 0 and (sprite_priority or bg_pixel == 0)) {
-            palette = sprite_palette;
-            pixel = sprite_pixel;
-        } else if (bg_pixel != 0) {
-            pixel = bg_pixel;
-            palette = bg_palette;
+            return @truncate((sprite_palette << 2) | sprite_pixel);
         }
-        return .{ palette, pixel };
+        if (bg_pixel != 0) {
+            return @truncate((bg_palette << 2) | bg_pixel);
+        }
+        return 0;
     }
 
     inline fn fetch_tile_data(self: *Self) void {
@@ -1477,6 +1481,7 @@ pub const PPU = struct {
         if (!self.write_toggle) {
             // self.scroll_register.fine_x = data;
             self.fine_x = data & 0x07;
+            self.refresh_fine_x_masks();
             self.tmp_addr.coarse_x = @truncate(data >> 3);
         } else {
             // self.scroll_register.fine_y = data;
@@ -1484,6 +1489,12 @@ pub const PPU = struct {
             self.tmp_addr.coarse_y = @truncate(data >> 3);
         }
         self.write_toggle = !self.write_toggle;
+    }
+
+    fn refresh_fine_x_masks(self: *Self) void {
+        const fine_x: u3 = @truncate(self.fine_x);
+        self.fine_x_pattern_mask = @as(u16, 0x8000) >> fine_x;
+        self.fine_x_attribute_mask = @as(u8, 0x80) >> fine_x;
     }
 
     /// Reads the `PPUSTATUS` register (`0x2002`) and returns its current state.
