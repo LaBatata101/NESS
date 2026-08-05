@@ -59,6 +59,8 @@ pub const Rom = struct {
     /// CHR ROM is mapped to address `0..0x1FFF`
     chr_rom: []u8,
     mapper: Mapper,
+    /// Cache mirroring to avoid performing a vtable call for every read.
+    mirroring_mode: Mirroring,
 
     const Self = @This();
 
@@ -146,6 +148,7 @@ pub const Rom = struct {
             .prg_rom = prg_rom,
             .chr_rom = chr_rom,
             .mapper = mapper,
+            .mirroring_mode = mapper.mirroring(),
         };
     }
 
@@ -159,6 +162,7 @@ pub const Rom = struct {
 
     pub fn loadState(self: *Self, snapshot: Snapshot) !void {
         try self.mapper.loadState(snapshot.mapper);
+        self.mirroring_mode = self.mapper.mirroring();
     }
 
     /// Read from PRG ROM ($8000-$FFFF)
@@ -174,6 +178,7 @@ pub const Rom = struct {
     /// Write to PRG ROM ($8000-$FFFF) space
     pub fn prg_rom_write(self: *Self, addr: u16, value: u8) void {
         self.mapper.prg_rom_write(addr, value);
+        self.mirroring_mode = self.mapper.mirroring();
     }
 
     /// Write to PRG RAM ($6000–$7FFF) space
@@ -193,7 +198,7 @@ pub const Rom = struct {
 
     /// Get current mirroring mode (can change with some mappers)
     pub fn get_mirroring(self: *const Self) Mirroring {
-        return self.mapper.mirroring();
+        return self.mirroring_mode;
     }
 
     /// Check if mapper has an active IRQ
@@ -224,21 +229,24 @@ pub const TestRom = struct {
         @memmove(prg_rom[0x8000 .. 0x8000 + opcodes.len], opcodes);
 
         const chr_rom = &[_]u8{0};
+        const mapper = Mapper.init(alloc, std.testing.io, 0, .{
+            .rom_path = "test.rom",
+            .prg_rom = prg_rom,
+            .chr_rom = chr_rom,
+            .prg_rom_banks = 0,
+            .prg_ram_size = 0,
+            .has_battery_backed_ram = false,
+            .mirroring_mode = mirroring,
+        }) catch @panic("Failed to init mapper\n");
+
         return .{
             .alloc = alloc,
             .prg_rom = prg_rom,
             .rom = .{
                 .prg_rom = prg_rom,
                 .chr_rom = @constCast(chr_rom),
-                .mapper = Mapper.init(alloc, std.testing.io, 0, .{
-                    .rom_path = "test.rom",
-                    .prg_rom = prg_rom,
-                    .chr_rom = chr_rom,
-                    .prg_rom_banks = 0,
-                    .prg_ram_size = 0,
-                    .has_battery_backed_ram = false,
-                    .mirroring_mode = mirroring,
-                }) catch @panic("Failed to init mapper\n"),
+                .mapper = mapper,
+                .mirroring_mode = mapper.mirroring(),
             },
         };
     }
@@ -271,4 +279,40 @@ test "network ROM battery RAM is disabled" {
     defer network_rom.deinit();
     network_rom.prg_ram_write(0, 0x5a);
     try std.testing.expectEqual(@as(u8, 0x5a), network_rom.prg_ram_read(0));
+}
+
+test "mirroring cache follows mapper writes and state loads" {
+    const alloc = std.testing.allocator;
+    const bytes = try alloc.alloc(u8, 16 + PRG_ROM_PAGE_SIZE);
+    defer alloc.free(bytes);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..4], &NES_TAG);
+    bytes[4] = 1;
+    bytes[6] = 0x10; // Mapper 1.
+
+    var rom = try Rom.initWithOptions(alloc, std.testing.io, "cache-test.nes", bytes, .{});
+    defer rom.deinit();
+
+    // MMC1 powers up in single-screen-lower mode, independently of the ROM header.
+    try std.testing.expectEqual(Mirroring.SINGLE_SCREEN_LOWER, rom.get_mirroring());
+
+    // MMC1 serial writes are least-significant bit first. Set control bits 0-1
+    // to 2 for vertical mirroring.
+    for (0..5) |i| {
+        rom.prg_rom_write(0x8000, @intCast((@as(u8, 0x02) >> @intCast(i)) & 1));
+    }
+    try std.testing.expectEqual(Mirroring.VERTICAL, rom.get_mirroring());
+
+    var snapshot = try rom.saveState(alloc);
+    defer snapshot.deinit(alloc);
+
+    // Change to horizontal mirroring, then ensure loading the snapshot refreshes
+    // the derived cache along with the mapper state.
+    for (0..5) |i| {
+        rom.prg_rom_write(0x8000, @intCast((@as(u8, 0x03) >> @intCast(i)) & 1));
+    }
+    try std.testing.expectEqual(Mirroring.HORIZONTAL, rom.get_mirroring());
+
+    try rom.loadState(snapshot);
+    try std.testing.expectEqual(Mirroring.VERTICAL, rom.get_mirroring());
 }
