@@ -356,10 +356,9 @@ fn writeCanonicalRef(writer: *std.Io.Writer, comptime T: type, value: *const T) 
             try writeCanonicalRef(writer, info.child, value.*);
         },
         .@"struct" => |info| if (info.layout == .@"packed") {
-            inline for (info.fields) |field| {
-                const field_value = @field(value.*, field.name);
-                try writeCanonicalRef(writer, field.type, &field_value);
-            }
+            const Int = info.backing_integer.?;
+            const backing: Int = @bitCast(value.*);
+            try writeCanonicalRef(writer, Int, &backing);
         } else inline for (info.fields) |field| {
             try writeCanonicalRef(writer, field.type, &@field(value.*, field.name));
         },
@@ -431,11 +430,10 @@ fn readCanonicalInto(alloc: std.mem.Allocator, comptime T: type, result: *T, rea
             result.* = child;
         },
         .@"struct" => |info| if (info.layout == .@"packed") {
-            inline for (info.fields) |field| {
-                var field_value: field.type = undefined;
-                try readCanonicalInto(alloc, field.type, &field_value, reader);
-                @field(result.*, field.name) = field_value;
-            }
+            const Int = info.backing_integer.?;
+            var backing: Int = undefined;
+            try readCanonicalInto(alloc, Int, &backing, reader);
+            result.* = @bitCast(backing);
         } else inline for (info.fields, 0..) |field, index| {
             readCanonicalInto(alloc, field.type, &@field(result.*, field.name), reader) catch |err| {
                 inline for (info.fields[0..index]) |decoded_field| {
