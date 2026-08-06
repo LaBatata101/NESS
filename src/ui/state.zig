@@ -156,7 +156,7 @@ pub const AppState = struct {
 
     history: game_history.GameHistory = undefined,
     current_rom_path: ?[]u8 = null,
-    save_state_info: [save_state.SLOT_COUNT]?save_state.SlotInfo = .{null} ** save_state.SLOT_COUNT,
+    save_state_info: [save_state.SLOT_COUNT]?save_state.SlotInfo = @splat(null),
     game_start_time_ms: i64 = 0,
 
     paused: bool = false,
@@ -966,7 +966,7 @@ pub const AppState = struct {
         self.ui.setTimer("load_state_toast", 1000);
     }
 
-    pub fn saveStateSlotInfo(self: *const Self, slot: usize) ?save_state.SlotInfo {
+    pub fn saveStateInfo(self: *const Self, slot: usize) ?save_state.SlotInfo {
         std.debug.assert(slot < save_state.SLOT_COUNT);
         return self.save_state_info[slot];
     }
@@ -1043,7 +1043,7 @@ pub const AppState = struct {
         self.show_android_settings_ui = false;
         self.show_android_multiplayer_ui = false;
         self.show_android_sidepanel = false;
-        self.clearSaveStateInfo();
+        @memset(self.save_state_info[0..], null);
     }
 
     fn saveCurrentGame(self: *Self) void {
@@ -1071,28 +1071,15 @@ pub const AppState = struct {
         self.game_start_time_ms = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
     }
 
-    // TODO: refactor this function
     fn refreshSaveStateInfo(self: *Self) void {
-        const rom_path = self.current_rom_path orelse {
-            self.clearSaveStateInfo();
-            return;
-        };
+        @memset(self.save_state_info[0..], null);
 
-        const name = if (builtin.abi.isAndroid())
-            (android.displayName(self.alloc, rom_path) catch @panic("JNI error")).?
-        else
-            std.fs.path.stem(rom_path);
-        defer if (builtin.abi.isAndroid()) self.alloc.free(name);
+        const name = self.romDisplayName();
+        defer self.alloc.free(name);
 
         for (&self.save_state_info, 0..) |*info, slot| {
-            if (save_state.slotInfo(self.alloc, self.io, name, slot)) |slot_info| {
-                info.* = slot_info;
-            } else |_| {}
+            info.* = save_state.info(self.alloc, self.io, name, slot) catch null;
         }
-    }
-
-    fn clearSaveStateInfo(self: *Self) void {
-        @memset(self.save_state_info[0..], null);
     }
 
     pub fn generalBinding(self: *const Self, action: GeneralAction) Key {

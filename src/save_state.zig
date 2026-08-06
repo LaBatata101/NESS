@@ -53,7 +53,7 @@ pub fn loadSlot(alloc: std.mem.Allocator, io: std.Io, rom_name: []const u8, syst
     try system.loadState(snapshot_);
 }
 
-pub fn slotInfo(alloc: std.mem.Allocator, io: std.Io, rom_name: []const u8, slot: usize) !SlotInfo {
+pub fn info(alloc: std.mem.Allocator, io: std.Io, rom_name: []const u8, slot: usize) !SlotInfo {
     std.debug.assert(slot < SLOT_COUNT);
 
     const file = try openStateFile(alloc, io, rom_name, slot);

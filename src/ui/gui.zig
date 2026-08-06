@@ -1082,7 +1082,7 @@ fn drawAndroidStateDialog(ui: *UI, app_state: *AppState, parent_id: clay.Element
             });
             {
                 for (0..save_state.SLOT_COUNT) |slot| {
-                    const slot_info = app_state.saveStateSlotInfo(slot);
+                    const slot_info = app_state.saveStateInfo(slot);
                     if (drawAndroidStateSlotRow(ui, slot, slot_info, mode)) {
                         switch (mode) {
                             .save => {
@@ -2027,7 +2027,7 @@ const SaveStateMenuMode = enum { save, load };
 
 fn drawStateSlotItems(ui: *UI, app_state: *AppState, mode: SaveStateMenuMode) void {
     for (0..save_state.SLOT_COUNT) |slot| {
-        const slot_info = app_state.saveStateSlotInfo(slot);
+        const slot_info = app_state.saveStateInfo(slot);
         const label = if (slot_info) |info|
             std.fmt.allocPrint(
                 ui.main_window.ctx.frameAlloc(),
