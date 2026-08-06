@@ -66,7 +66,6 @@ pub fn deinit(alloc: std.mem.Allocator) void {
 
     log_timezone.deinit();
     log_timezone = zeit.utc;
-    context.io = undefined;
 }
 
 pub fn path() ?[]const u8 {
