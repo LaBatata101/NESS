@@ -58,10 +58,7 @@ fn SDL_main() callconv(.c) void {
     defer threaded.deinit();
 
     appMain(std.heap.smp_allocator, threaded.io(), null) catch |err| {
-        std.log.err("{t}", .{err});
-        if (@errorReturnTrace()) |trace| {
-            std.debug.dumpErrorReturnTrace(trace);
-        }
+        std.debug.panic("{any}", .{err});
     };
 }
 

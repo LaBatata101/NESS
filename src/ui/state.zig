@@ -1627,14 +1627,14 @@ pub const AppState = struct {
                             self.show_android_multiplayer_ui = false;
                             self.render_home_ui = false;
                             if (self.emulation_running) self.ui.setWindowFullscreen(true);
-                        } else if (self.netplay.session_window_handle) |window| {
-                            self.closeSessionWindow(window);
+                        } else {
+                            self.closeSessionWindow(self.netplay.session_window_handle.?);
                         }
                     } else if (state == .connected and
                         self.netplay.active_session_role == .host and
                         !builtin.abi.isAndroid())
                     {
-                        if (self.netplay.session_window_handle) |window| window.setWindowSize(600, 400);
+                        self.netplay.session_window_handle.?.setWindowSize(600, 400);
                     }
                 },
                 .session_code => {
@@ -2283,8 +2283,8 @@ pub const AppState = struct {
                     self.render_home_ui = !self.emulation_running;
                     if (self.emulation_running) self.ui.setWindowFullscreen(true);
                 }
-            } else if (self.netplay.session_window_handle) |window| {
-                self.closeSessionWindow(window);
+            } else {
+                self.closeSessionWindow(self.netplay.session_window_handle.?);
             }
         }
 
