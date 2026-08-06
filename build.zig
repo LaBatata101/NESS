@@ -119,6 +119,35 @@ pub fn build(b: *std.Build) !void {
                 run_cmd.addArgs(args);
             }
 
+            const profiler_exe = b.addExecutable(.{
+                .name = "profiler",
+                .use_llvm = true,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/profiler.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "ness", .module = deps.mod },
+                    },
+                    .link_libc = true,
+                }),
+            });
+            profiler_exe.root_module.addIncludePath(b.path("third-party/blip_buf-1.1.0"));
+            profiler_exe.root_module.linkLibrary(deps.sdl_lib);
+            profiler_exe.root_module.linkLibrary(deps.blip_buf_lib);
+
+            const install_profiler = b.addInstallArtifact(profiler_exe, .{});
+            b.getInstallStep().dependOn(&install_profiler.step);
+
+            const profiler_step = b.step("profiler", "Run the deterministic 30-second profiler");
+            const run_profiler = b.addRunArtifact(profiler_exe);
+            run_profiler.setCwd(b.path("."));
+            run_profiler.step.dependOn(&install_profiler.step);
+            if (b.args) |args| {
+                run_profiler.addArgs(args);
+            }
+            profiler_step.dependOn(&run_profiler.step);
+
             addTestStep(b, target, optimize, deps, exe);
         }
     }
