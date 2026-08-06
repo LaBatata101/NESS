@@ -262,9 +262,8 @@ pub const Mapper4 = struct {
     }
 
     fn chr_read(self: *Self, addr: u16) u8 {
-        if (addr >= 0x2000) {
-            std.debug.panic("Invalid address: 0x{X:04}\n", .{addr});
-        }
+        std.debug.assert(addr <= 0x2000);
+
         const page: usize = @intCast(addr >> 10);
         const offset: usize = @intCast(addr & 0x03FF);
         const mapped_addr = self.chr_page_offsets[page] + offset;
